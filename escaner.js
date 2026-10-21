@@ -18,6 +18,7 @@ const Escaner = {
   encendiendo: false,
   pendiente: false,
   zoom: 1,
+  camaras: [],    // cámaras traseras del dispositivo (se conocen tras dar permiso)
 
   // Marcado del escáner. Tras pintarlo hay que llamar a Escaner.montar(alLeer).
   html(pista) {
@@ -45,15 +46,13 @@ const Escaner = {
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('este navegador no permite usar la cámara (¿la página no es https?)');
       const motor = prepararDetector(); // se carga a la vez que se abre la cámara
-      flujo = await conLimite(navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-      }), 10000, 'la cámara no responde. Ciérrala en otras aplicaciones o pestañas y reintenta');
+      flujo = await conLimite(abrirCamara(), 10000, 'la cámara no responde. Ciérrala en otras aplicaciones o pestañas y reintenta');
       if (!document.body.contains(caja)) { detener(flujo); return; } // se cambió de pantalla mientras tanto
       const pista = flujo.getVideoTracks()[0];
       await ajustarCamara(pista);
+      this.camaras = await camarasTraseras();
       caja.innerHTML = `<video id="camaraVideo" playsinline muted autoplay></video><div class="camara-marco" id="camaraMarco"></div>
-        <div class="camara-botones"><button class="btn ghost sm" id="camaraLuz" hidden onclick="Escaner.luz()">Linterna</button><button class="btn ghost sm" id="camaraZoom" hidden onclick="Escaner.cambiarZoom()">Zoom ×1</button><button class="btn ghost sm" onclick="Escaner.apagar()">Parar</button></div>
+        <div class="camara-botones"><button class="btn ghost sm" id="camaraLente" hidden onclick="Escaner.cambiarCamara()">Cámara 1</button><button class="btn ghost sm" id="camaraLuz" hidden onclick="Escaner.luz()">Linterna</button><button class="btn ghost sm" id="camaraZoom" hidden onclick="Escaner.cambiarZoom()">Zoom ×1</button><button class="btn ghost sm" onclick="Escaner.apagar()">Parar</button></div>
         <div class="camara-info" id="camaraInfo"></div>`;
       const video = caja.querySelector('video');
       video.srcObject = flujo;
@@ -112,6 +111,8 @@ const Escaner = {
     const cap = capacidades(a.pista), ajustes = a.pista.getSettings ? a.pista.getSettings() : {};
     const luz = document.getElementById('camaraLuz'), zoom = document.getElementById('camaraZoom');
     if (luz) luz.hidden = !cap.torch;
+    const lente = document.getElementById('camaraLente'), n = this.camaras.length;
+    if (lente && n > 1) { lente.hidden = false; lente.textContent = 'Cámara ' + (indiceCamara(this.camaras, ajustes.deviceId) + 1) + '/' + n; }
     if (zoom && cap.zoom && cap.zoom.max >= 2) { zoom.hidden = false; zoom.textContent = 'Zoom ×' + redondo(this.zoom); }
     const info = document.getElementById('camaraInfo');
     if (info) info.textContent = (ajustes.width || a.video.videoWidth) + '×' + (ajustes.height || a.video.videoHeight) + ' · ' + nombreMotor(a.detectores) + (cap.zoom ? ' · ×' + redondo(this.zoom) : '');
@@ -134,6 +135,17 @@ const Escaner = {
     await this.ponerZoom(nuevo);
     try { localStorage.setItem('camaraZoom', String(nuevo)); } catch (e) { /* sin almacenamiento */ }
     this.mostrarControles();
+  },
+
+  // Los móviles con varias cámaras traseras (gran angular, ultra gran angular, tele) no siempre abren la
+  // mejor para leer de cerca: este botón pasa a la siguiente y el dispositivo recuerda la elección.
+  async cambiarCamara() {
+    const a = this.activo; if (!a || this.camaras.length < 2) return;
+    const actual = indiceCamara(this.camaras, (a.pista.getSettings ? a.pista.getSettings() : {}).deviceId);
+    const siguiente = this.camaras[(actual + 1) % this.camaras.length];
+    try { localStorage.setItem('camaraId', siguiente.deviceId); } catch (e) { /* sin almacenamiento */ }
+    this.apagar(false);
+    await this.encender();
   },
 
   async ponerZoom(z) {
@@ -200,6 +212,32 @@ function mensajeCamara(e) {
   return (e && e.message) || String(e);
 }
 
+// Abre la cámara elegida en este dispositivo o, si no hay ninguna (o ya no existe), la trasera por defecto.
+// En Android se pide 4K: en vertical el vídeo solo tiene 1080 px de ancho y las barras de una etiqueta de
+// 44 mm se quedan en 2–3 px; con más resolución se leen sin acercarse tanto. Si no la admite, da la máxima.
+async function abrirCamara() {
+  const android = /Android/i.test(navigator.userAgent);
+  const tam = android ? { width: { ideal: 3840 }, height: { ideal: 2160 } } : { width: { ideal: 1920 }, height: { ideal: 1080 } };
+  let id = null;
+  try { id = localStorage.getItem('camaraId'); } catch (e) { /* sin almacenamiento */ }
+  if (id) {
+    try { return await navigator.mediaDevices.getUserMedia({ audio: false, video: { deviceId: { exact: id }, ...tam } }); }
+    catch (e) { if (e && e.name === 'NotAllowedError') throw e; try { localStorage.removeItem('camaraId'); } catch (x) { /* sin almacenamiento */ } }
+  }
+  return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, ...tam } });
+}
+
+// Cámaras traseras (los nombres solo se conocen después de dar permiso). Si no se distingue cuáles son
+// traseras (ordenadores), se devuelven todas.
+async function camarasTraseras() {
+  try {
+    const todas = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput' && d.deviceId);
+    const traseras = todas.filter(d => /back|rear|trasera|posterior|environment/i.test(d.label));
+    return traseras.length ? traseras : todas;
+  } catch (e) { return []; }
+}
+const indiceCamara = (lista, id) => Math.max(0, lista.findIndex(c => c.deviceId === id));
+
 // Zoom de partida: el que eligió la persona en este dispositivo o, si no, ×2.
 function zoomPreferido(pista) {
   const cap = capacidades(pista).zoom; if (!cap) return 0;
@@ -261,6 +299,7 @@ function enviarDiagnostico(a, zoom) {
     api('diagnosticoEscaner', {
       dispositivo: navigator.userAgent, pantalla: location.hash, segundos: seg,
       motor: nombreMotor(a.detectores), resolucion: (aj.width || a.video.videoWidth) + 'x' + (aj.height || a.video.videoHeight),
+      camara: (Escaner.camaras.find(c => c.deviceId === aj.deviceId) || {}).label || '', camaras: Escaner.camaras.map(c => c.label).join(' | '),
       zoom: redondo(zoom || 1), zoomMax: cap.zoom ? cap.zoom.max : null, enfoque: (cap.focusMode || []).join('/'), linterna: !!cap.torch,
       fotogramas: e.fotogramas, msPorFotograma: e.fotogramas ? Math.round(e.ms / e.fotogramas) : null,
       lecturas: e.lecturas, porNativo: e.nativo, porZxing: e.zxing, primeraLecturaMs: e.primera || null
