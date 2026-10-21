@@ -113,6 +113,8 @@ async function llamar(accion, datos, idem, intento = 1) {
       : idem ? 'El servidor no ha confirmado la operación. Inténtalo de nuevo: no se duplicará.'
       : 'El servidor no ha respondido. Comprueba la conexión e inténtalo de nuevo.');
   } finally { progreso(-1); }
+  // 503: otra operación tenía el turno de escritura. Se reintenta solo (con la misma clave no se duplica nada).
+  if (!res.ok && res.codigo === 503 && intento < 3) { await new Promise(ok => setTimeout(ok, 1500 * intento)); return llamar(accion, datos, idem, intento + 1); }
   if (!res.ok) {
     if (res.codigo === 401 || (res.codigo === 403 && !state.usuario)) { store.del('token'); vLogin(res.error); }
     // 409: la web tenía datos desfasados (otra persona cambió algo). Se ponen al día antes de avisar.

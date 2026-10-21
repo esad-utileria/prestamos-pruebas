@@ -570,9 +570,22 @@ function tarjetaSolicitud(s) {
       <div class="hint">Aprobar registra el préstamo en este momento, con el material entregado.</div>`}
   </div>`;
 }
+// Último botón pulsado: mientras se guarda, sus botones vecinos quedan desactivados y él dice «Enviando…»
+let botonPulsado = null;
+document.addEventListener('click', e => { botonPulsado = e.target.closest ? e.target.closest('button') : null; }, true);
 async function accionSolicitud(id, accion, datos, mensaje) {
-  try { await api(accion, { id, ...datos }); toast(mensaje); gs.lista = null; gs.citando = null; await refrescarCatalogo(); render(); }
-  catch (e) { if (e.codigo === 409) gs.citando = null; fallo(e); }
+  const btn = botonPulsado, vecinos = btn ? [...btn.parentElement.querySelectorAll('button')] : [], texto = btn && btn.textContent;
+  vecinos.forEach(b => { b.disabled = true; });
+  if (btn) btn.textContent = 'Enviando…';
+  try {
+    await api(accion, { id, ...datos }); toast(mensaje); gs.lista = null; gs.citando = null; render();
+    refrescarCatalogo().then(() => { if (location.hash === '#solicitudes') render(); });
+  } catch (e) {
+    if (e.codigo === 409) gs.citando = null;
+    vecinos.forEach(b => { b.disabled = false; });
+    if (btn) btn.textContent = texto;
+    fallo(e);
+  }
 }
 function bloqueCitaDocente(s) {
   const msg = s.mensajeCita ? ` «${esc(s.mensajeCita)}»` : '';
