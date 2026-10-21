@@ -66,7 +66,7 @@ function cerrarSesion() {
 //   falla, se reintentan con la misma clave y el servidor no las ejecuta dos veces.
 // - Una escritura idéntica que ya está en marcha (doble pulsación) no se envía otra vez.
 // - Tras guardar algo, las listas en memoria se marcan como desfasadas.
-const SOLO_LECTURA = new Set(['yo', 'catalogo', 'fotos', 'usuarios', 'prestamos', 'buscarCodigo', 'codigos', 'solicitudes', 'incidencias']);
+const SOLO_LECTURA = new Set(['diagnosticoEscaner', 'yo', 'catalogo', 'fotos', 'usuarios', 'prestamos', 'buscarCodigo', 'codigos', 'solicitudes', 'incidencias']);
 const enVuelo = new Map(); // escrituras en marcha: clave -> promesa
 let pendientesApi = 0, temporizadorBarra = null;
 function progreso(delta) {

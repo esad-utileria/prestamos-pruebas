@@ -1,16 +1,17 @@
 // Escáner de códigos: cámara en vivo y, como alternativa, escribir el código o usar un lector
 // USB/Bluetooth (funciona como un teclado: escribe y pulsa Intro).
 //
-// Motor de lectura: el BarcodeDetector nativo del navegador (Android/Chrome, muy rápido) y, donde no
-// existe o no lee Code 128 (iPhone, Windows), ZXing-C++ en WebAssembly (barcode-detector). Se pide a la
-// cámara alta resolución y enfoque continuo, y se analiza a resolución completa la franja que se ve en
-// pantalla: las etiquetas son de 50 × 10 mm y con poca resolución las barras se funden.
+// Motor de lectura: el BarcodeDetector nativo del navegador (Android/Chrome, muy rápido) y ZXing-C++ en
+// WebAssembly (barcode-detector), que es el único en iPhone y ordenadores y en Android entra a relevos con
+// el nativo si este tarda en leer. Se pide a la cámara alta resolución, enfoque continuo y zoom ×2 (las
+// etiquetas son de 50 × 10 mm: de cerca no enfocan y de lejos las barras se funden), y se analiza a
+// resolución completa la parte del vídeo que se ve. Cada sesión deja un diagnóstico en el Log.
 
 const MOTOR_ZXING = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.1/dist/iife/ponyfill.js';
 const FORMATOS = ['code_128', 'qr_code', 'code_39', 'ean_13', 'ean_8'];
 
 const Escaner = {
-  activo: null,   // { flujo, video, pista, detector, motor, temporizador }
+  activo: null,   // { flujo, video, pista, detectores, temporizador, vuelta, fallos, est }
   ultimo: '',
   ultimoT: 0,
   alLeer: null,
@@ -57,9 +58,13 @@ const Escaner = {
       const video = caja.querySelector('video');
       video.srcObject = flujo;
       await conLimite(video.play(), 5000, 'el vídeo de la cámara no arranca');
-      const { detector, nombre } = await conLimite(motor, 20000, 'no se ha podido cargar el lector de códigos. Revisa la conexión');
+      const detectores = await conLimite(motor, 20000, 'no se ha podido cargar el lector de códigos. Revisa la conexión');
       if (!document.body.contains(video)) { detener(flujo); return; }
-      this.activo = { flujo, video, pista, detector, motor: nombre, temporizador: 0 };
+      this.activo = { flujo, video, pista, detectores, temporizador: 0, vuelta: 0, fallos: 0,
+        est: { inicio: Date.now(), fotogramas: 0, ms: 0, lecturas: 0, primera: 0, nativo: 0, zxing: 0 } };
+      if (!detectores.zxing) cargarZxing(detectores); // refuerzo listo por si el nativo no lee
+      await this.ponerZoom(zoomPreferido(pista));
+      video.onclick = ev => this.enfocar(ev);
       this.mostrarControles();
       try { localStorage.setItem('camara', 'si'); } catch (e) { /* sin almacenamiento */ }
       this.analizar();
@@ -77,15 +82,26 @@ const Escaner = {
     const a = this.activo;
     if (!a || this.activo !== a) return;
     if (!document.body.contains(a.video)) { this.apagar(false); return; }
-    let espera = 80;
+    let espera = 60;
     if (!document.hidden && a.video.readyState >= 2 && a.video.videoWidth) {
       try {
-        // ZXing solo lee códigos de barras casi horizontales: si no lee, prueba también con el fotograma girado
-        const giro = a.motor === 'ZXing' ? GIROS[(a.vuelta = (a.vuelta || 0) + 1) % GIROS.length] : 0;
-        const lienzo = recorteVisible(a.video, giro);
-        const codigos = await a.detector.detect(lienzo);
-        const bueno = codigos.find(c => c.rawValue && c.rawValue.trim());
-        if (bueno && this.activo === a) { this.leido(bueno.rawValue); espera = 400; }
+        const d = a.detectores, n = ++a.vuelta;
+        // Con lector nativo, ZXing entra un fotograma de cada dos en cuanto el nativo falla unas cuantas veces
+        const usarZxing = !d.nativo || (a.fallos > 4 && n % 2 === 0 && !!d.zxing);
+        const detector = usarZxing ? d.zxing : d.nativo;
+        if (detector) {
+          // ZXing solo lee códigos de barras casi horizontales: prueba también con el fotograma girado
+          const giro = usarZxing ? GIROS[Math.floor(n / (d.nativo ? 2 : 1)) % GIROS.length] : 0;
+          const t0 = performance.now();
+          const codigos = await detector.detect(recorteVisible(a.video, giro));
+          a.est.fotogramas++; a.est.ms += performance.now() - t0;
+          const bueno = codigos.find(c => c.rawValue && c.rawValue.trim());
+          if (bueno && this.activo === a) {
+            a.fallos = 0; a.est.lecturas++; a.est[usarZxing ? 'zxing' : 'nativo']++;
+            if (!a.est.primera) a.est.primera = Date.now() - a.est.inicio;
+            this.leido(bueno.rawValue); espera = 400;
+          } else a.fallos++;
+        }
       } catch (e) { espera = 300; /* un fotograma que no se pudo leer: se sigue con el siguiente */ }
     } else espera = 200;
     if (this.activo === a) a.temporizador = setTimeout(() => this.analizar(), espera);
@@ -96,9 +112,9 @@ const Escaner = {
     const cap = capacidades(a.pista), ajustes = a.pista.getSettings ? a.pista.getSettings() : {};
     const luz = document.getElementById('camaraLuz'), zoom = document.getElementById('camaraZoom');
     if (luz) luz.hidden = !cap.torch;
-    if (zoom && cap.zoom && cap.zoom.max >= 2) { zoom.hidden = false; zoom.textContent = 'Zoom ×' + (this.zoom > 1 ? 1 : 2); }
+    if (zoom && cap.zoom && cap.zoom.max >= 2) { zoom.hidden = false; zoom.textContent = 'Zoom ×' + redondo(this.zoom); }
     const info = document.getElementById('camaraInfo');
-    if (info) info.textContent = (ajustes.width || a.video.videoWidth) + '×' + (ajustes.height || a.video.videoHeight) + ' · ' + a.motor;
+    if (info) info.textContent = (ajustes.width || a.video.videoWidth) + '×' + (ajustes.height || a.video.videoHeight) + ' · ' + nombreMotor(a.detectores) + (cap.zoom ? ' · ×' + redondo(this.zoom) : '');
   },
 
   async luz() {
@@ -108,19 +124,42 @@ const Escaner = {
     const b = document.getElementById('camaraLuz'); if (b) b.classList.toggle('activo', !!a.linterna);
   },
 
-  // Con zoom se puede alejar el móvil: muchas cámaras no enfocan a menos de 10–20 cm.
+  // Con zoom se puede alejar el móvil: muchas cámaras no enfocan a menos de 10–20 cm. Rota ×1 → ×2 → ×3
+  // (según lo que admita la cámara) y recuerda la elección en este dispositivo.
   async cambiarZoom() {
     const a = this.activo; if (!a) return;
     const cap = capacidades(a.pista).zoom; if (!cap) return;
-    const nuevo = this.zoom > 1 ? Math.max(1, cap.min) : Math.min(2, cap.max);
-    try { await a.pista.applyConstraints({ advanced: [{ zoom: nuevo }] }); this.zoom = nuevo; } catch (e) { /* sin zoom */ }
+    const niveles = [1, 2, 3].filter(z => z <= cap.max);
+    const nuevo = niveles[(niveles.indexOf(Math.round(this.zoom)) + 1) % niveles.length] || 1;
+    await this.ponerZoom(nuevo);
+    try { localStorage.setItem('camaraZoom', String(nuevo)); } catch (e) { /* sin almacenamiento */ }
     this.mostrarControles();
+  },
+
+  async ponerZoom(z) {
+    const a = this.activo; if (!a) return;
+    const cap = capacidades(a.pista).zoom; if (!cap || !z) return;
+    const valor = Math.min(Math.max(z, cap.min || 1), cap.max);
+    try { await a.pista.applyConstraints({ advanced: [{ zoom: valor }] }); this.zoom = valor; } catch (e) { /* sin zoom */ }
+  },
+
+  // Tocar el vídeo enfoca en ese punto (si la cámara lo admite) y vuelve después al enfoque continuo.
+  async enfocar(ev) {
+    const a = this.activo; if (!a) return;
+    const modos = capacidades(a.pista).focusMode || [];
+    if (!modos.includes('single-shot')) return;
+    const r = a.video.getBoundingClientRect();
+    const punto = { x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height };
+    try {
+      await a.pista.applyConstraints({ advanced: [{ focusMode: 'single-shot', pointsOfInterest: [punto] }] });
+      setTimeout(() => { if (this.activo === a && modos.includes('continuous')) a.pista.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {}); }, 1500);
+    } catch (e) { /* no lo admite */ }
   },
 
   apagar(recordar = true) {
     const a = this.activo; this.activo = null;
     if (recordar) { try { localStorage.setItem('camara', 'no'); } catch (e) { /* sin almacenamiento */ } }
-    if (a) { clearTimeout(a.temporizador); detener(a.flujo); a.video.srcObject = null; }
+    if (a) { clearTimeout(a.temporizador); enviarDiagnostico(a, this.zoom); detener(a.flujo); a.video.srcObject = null; }
     const caja = document.getElementById('camara');
     if (caja && recordar) caja.innerHTML = '<div class="camara-off"><button class="btn" onclick="Escaner.encender()">Activar cámara</button></div>';
   },
@@ -150,6 +189,8 @@ const espera = ms => new Promise(ok => setTimeout(ok, ms));
 const conLimite = (promesa, ms, mensaje) => Promise.race([promesa, espera(ms).then(() => { throw new Error(mensaje); })]);
 const detener = flujo => flujo.getTracks().forEach(t => t.stop());
 const capacidades = pista => { try { return pista.getCapabilities ? pista.getCapabilities() : {}; } catch (e) { return {}; } };
+const redondo = z => Math.round(z * 10) / 10;
+const nombreMotor = d => d.nativo ? (d.zxing ? 'lector del móvil + ZXing' : 'lector del móvil') : 'ZXing';
 
 function mensajeCamara(e) {
   const n = e && e.name;
@@ -159,7 +200,15 @@ function mensajeCamara(e) {
   return (e && e.message) || String(e);
 }
 
-// Enfoque continuo y algo de resolución extra si la cámara lo permite (cada móvil admite cosas distintas).
+// Zoom de partida: el que eligió la persona en este dispositivo o, si no, ×2.
+function zoomPreferido(pista) {
+  const cap = capacidades(pista).zoom; if (!cap) return 0;
+  let z = 2;
+  try { z = Number(localStorage.getItem('camaraZoom')) || 2; } catch (e) { /* sin almacenamiento */ }
+  return Math.min(z, cap.max);
+}
+
+// Enfoque y exposición continuos si la cámara lo permite (cada móvil admite cosas distintas).
 async function ajustarCamara(pista) {
   const cap = capacidades(pista);
   const avanzado = [];
@@ -169,7 +218,8 @@ async function ajustarCamara(pista) {
   Escaner.zoom = 1;
 }
 
-// Motor de lectura: nativo si lee Code 128; si no, ZXing (se descarga una vez y queda en caché).
+// Motores de lectura: { nativo, zxing }. Si hay nativo que lea Code 128 se usa ya y ZXing se carga
+// después en segundo plano (cargarZxing); si no, se espera a ZXing (se descarga una vez y queda en caché).
 let detectorListo = null;
 function prepararDetector() {
   return detectorListo = detectorListo || (async () => {
@@ -177,14 +227,21 @@ function prepararDetector() {
     if (forzar !== 'zxing' && 'BarcodeDetector' in window) {
       try {
         const admite = await BarcodeDetector.getSupportedFormats();
-        if (admite.includes('code_128')) return { detector: new BarcodeDetector({ formats: FORMATOS.filter(f => admite.includes(f)) }), nombre: 'lector del móvil' };
+        if (admite.includes('code_128')) return { nativo: new BarcodeDetector({ formats: FORMATOS.filter(f => admite.includes(f)) }), zxing: null };
       } catch (e) { /* se usa ZXing */ }
     }
-    if (!window.BarcodeDetectionAPI) await cargarScript(MOTOR_ZXING);
-    const detector = new window.BarcodeDetectionAPI.BarcodeDetector({ formats: FORMATOS });
-    await detector.detect(document.createElement('canvas')).catch(() => {}); // descarga y prepara el WebAssembly ya
-    return { detector, nombre: 'ZXing' };
+    return { nativo: null, zxing: await nuevoZxing() };
   })().catch(e => { detectorListo = null; throw e; });
+}
+async function nuevoZxing() {
+  if (!window.BarcodeDetectionAPI) await cargarScript(MOTOR_ZXING);
+  const detector = new window.BarcodeDetectionAPI.BarcodeDetector({ formats: FORMATOS });
+  await detector.detect(document.createElement('canvas')).catch(() => {}); // descarga y prepara el WebAssembly ya
+  return detector;
+}
+// Carga ZXing como refuerzo en segundo plano, sin parar el escaneo.
+function cargarZxing(d) {
+  if (!d.cargandoZxing) d.cargandoZxing = nuevoZxing().then(z => { d.zxing = z; }).catch(() => { d.cargandoZxing = null; });
 }
 function cargarScript(src) {
   return new Promise((ok, mal) => {
@@ -194,10 +251,28 @@ function cargarScript(src) {
   });
 }
 
+// Al cerrar la cámara se manda al Log un resumen técnico de la sesión (sin imágenes) para poder
+// depurar con datos de los móviles reales: modelo, lector, resolución, zoom, tiempos y lecturas.
+function enviarDiagnostico(a, zoom) {
+  try {
+    const e = a.est, seg = Math.round((Date.now() - e.inicio) / 1000);
+    if (seg < 3 || typeof api !== 'function') return;
+    const cap = capacidades(a.pista), aj = a.pista.getSettings ? a.pista.getSettings() : {};
+    api('diagnosticoEscaner', {
+      dispositivo: navigator.userAgent, pantalla: location.hash, segundos: seg,
+      motor: nombreMotor(a.detectores), resolucion: (aj.width || a.video.videoWidth) + 'x' + (aj.height || a.video.videoHeight),
+      zoom: redondo(zoom || 1), zoomMax: cap.zoom ? cap.zoom.max : null, enfoque: (cap.focusMode || []).join('/'), linterna: !!cap.torch,
+      fotogramas: e.fotogramas, msPorFotograma: e.fotogramas ? Math.round(e.ms / e.fotogramas) : null,
+      lecturas: e.lecturas, porNativo: e.nativo, porZxing: e.zxing, primeraLecturaMs: e.primera || null
+    }).catch(() => {});
+  } catch (x) { /* el diagnóstico nunca debe molestar */ }
+}
+
 // Copia a resolución completa la parte del vídeo que se ve en pantalla (el vídeo va recortado con
 // object-fit: cover), con algo de margen alrededor del marco, que es donde la persona apunta.
 const lienzoEscaner = document.createElement('canvas');
-const GIROS = [0, 12, 0, -12, 0, 24, 0, -24].map(g => g * Math.PI / 180);
+// ZXing tolera unos ±7° por intento: con pasos de 10° cubre etiquetas inclinadas hasta unos ±37°
+const GIROS = [0, 10, -10, 0, 20, -20, 0, 30, -30].map(g => g * Math.PI / 180);
 function recorteVisible(video, giro = 0) {
   const vw = video.videoWidth, vh = video.videoHeight;
   const ew = video.clientWidth || vw, eh = video.clientHeight || vh;
