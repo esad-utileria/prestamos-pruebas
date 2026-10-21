@@ -47,10 +47,11 @@ const Escaner = {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('este navegador no permite usar la cámara (¿la página no es https?)');
       const motor = prepararDetector(); // se carga a la vez que se abre la cámara
       flujo = await conLimite(abrirCamara(), 10000, 'la cámara no responde. Ciérrala en otras aplicaciones o pestañas y reintenta');
+      this.camaras = await camarasTraseras();
+      flujo = await conLimite(camaraConEnfoque(flujo, this.camaras), 15000, 'la cámara no responde. Ciérrala en otras aplicaciones o pestañas y reintenta');
       if (!document.body.contains(caja)) { detener(flujo); return; } // se cambió de pantalla mientras tanto
       const pista = flujo.getVideoTracks()[0];
       await ajustarCamara(pista);
-      this.camaras = await camarasTraseras();
       caja.innerHTML = `<video id="camaraVideo" playsinline muted autoplay></video><div class="camara-marco" id="camaraMarco"></div>
         <div class="camara-botones"><button class="btn ghost sm" id="camaraLente" hidden onclick="Escaner.cambiarCamara()">Cámara 1</button><button class="btn ghost sm" id="camaraLuz" hidden onclick="Escaner.luz()">Linterna</button><button class="btn ghost sm" id="camaraZoom" hidden onclick="Escaner.cambiarZoom()">Zoom ×1</button><button class="btn ghost sm" onclick="Escaner.apagar()">Parar</button></div>
         <div class="camara-info" id="camaraInfo"></div>`;
@@ -143,7 +144,7 @@ const Escaner = {
     const a = this.activo; if (!a || this.camaras.length < 2) return;
     const actual = indiceCamara(this.camaras, (a.pista.getSettings ? a.pista.getSettings() : {}).deviceId);
     const siguiente = this.camaras[(actual + 1) % this.camaras.length];
-    try { localStorage.setItem('camaraId', siguiente.deviceId); } catch (e) { /* sin almacenamiento */ }
+    guardarCamara(siguiente.deviceId);
     this.apagar(false);
     await this.encender();
   },
@@ -213,18 +214,44 @@ function mensajeCamara(e) {
 }
 
 // Abre la cámara elegida en este dispositivo o, si no hay ninguna (o ya no existe), la trasera por defecto.
-// En Android se pide 4K: en vertical el vídeo solo tiene 1080 px de ancho y las barras de una etiqueta de
-// 44 mm se quedan en 2–3 px; con más resolución se leen sin acercarse tanto. Si no la admite, da la máxima.
+// Se pide 1080p: en 4K un móvil corriente tarda más de medio segundo por fotograma (medido en un Samsung),
+// y con la cámara principal y zoom ×2–×3 las barras ya se ven con detalle de sobra.
+const TAM_VIDEO = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+const camaraGuardada = () => { try { return localStorage.getItem('camaraId'); } catch (e) { return null; } };
+const guardarCamara = id => { try { if (id) localStorage.setItem('camaraId', id); else localStorage.removeItem('camaraId'); } catch (e) { /* sin almacenamiento */ } };
+const abrirId = id => navigator.mediaDevices.getUserMedia({ audio: false, video: { deviceId: { exact: id }, ...TAM_VIDEO } });
 async function abrirCamara() {
-  const android = /Android/i.test(navigator.userAgent);
-  const tam = android ? { width: { ideal: 3840 }, height: { ideal: 2160 } } : { width: { ideal: 1920 }, height: { ideal: 1080 } };
-  let id = null;
-  try { id = localStorage.getItem('camaraId'); } catch (e) { /* sin almacenamiento */ }
+  const id = camaraGuardada();
   if (id) {
-    try { return await navigator.mediaDevices.getUserMedia({ audio: false, video: { deviceId: { exact: id }, ...tam } }); }
-    catch (e) { if (e && e.name === 'NotAllowedError') throw e; try { localStorage.removeItem('camaraId'); } catch (x) { /* sin almacenamiento */ } }
+    try { return await abrirId(id); }
+    catch (e) { if (e && e.name === 'NotAllowedError') throw e; guardarCamara(null); }
   }
-  return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, ...tam } });
+  return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, ...TAM_VIDEO } });
+}
+
+// Muchos Android (p. ej. Samsung) abren por defecto una cámara trasera secundaria con enfoque fijo, que de
+// cerca ve la etiqueta borrosa (medido: 0–1 lecturas en 30 s frente a 20 lecturas con la principal). La
+// primera vez, si la cámara abierta no tiene autoenfoque, se prueban las demás traseras y se queda la
+// primera que lo tenga (mejor si además tiene linterna, que suele indicar la principal). Se recuerda.
+const tieneAutoenfoque = pista => (capacidades(pista).focusMode || []).includes('continuous');
+async function camaraConEnfoque(flujo, camaras) {
+  const pista = flujo.getVideoTracks()[0];
+  const actual = (pista.getSettings ? pista.getSettings() : {}).deviceId;
+  if (camaraGuardada() || camaras.length < 2 || tieneAutoenfoque(pista)) return flujo;
+  detener(flujo); // en Android no se pueden abrir dos cámaras a la vez
+  let elegido = null, elegidoId = null;
+  for (const c of camaras.filter(c => c.deviceId !== actual)) {
+    let otro;
+    try { otro = await abrirId(c.deviceId); } catch (e) { continue; }
+    const p = otro.getVideoTracks()[0];
+    if (tieneAutoenfoque(p) && (!elegido || capacidades(p).torch)) {
+      if (elegido) detener(elegido);
+      elegido = otro; elegidoId = c.deviceId;
+      if (capacidades(p).torch) break;
+    } else detener(otro);
+  }
+  if (elegido) { guardarCamara(elegidoId); return elegido; }
+  return actual ? abrirId(actual) : abrirCamara(); // ninguna tiene autoenfoque: se vuelve a la de antes
 }
 
 // Cámaras traseras (los nombres solo se conocen después de dar permiso). Si no se distingue cuáles son
@@ -307,9 +334,11 @@ function enviarDiagnostico(a, zoom) {
   } catch (x) { /* el diagnóstico nunca debe molestar */ }
 }
 
-// Copia a resolución completa la parte del vídeo que se ve en pantalla (el vídeo va recortado con
-// object-fit: cover), con algo de margen alrededor del marco, que es donde la persona apunta.
+// Copia la zona del marco (con margen) de la parte del vídeo que se ve en pantalla (el vídeo va recortado
+// con object-fit: cover). Si sale más ancha de MAX_ANCHO se reduce: analizar más píxeles no lee mejor y
+// en móviles corrientes cada fotograma pasaba de 200 ms.
 const lienzoEscaner = document.createElement('canvas');
+const MAX_ANCHO = 1280;
 // ZXing tolera unos ±7° por intento: con pasos de 10° cubre etiquetas inclinadas hasta unos ±37°
 const GIROS = [0, 10, -10, 0, 20, -20, 0, 30, -30].map(g => g * Math.PI / 180);
 function recorteVisible(video, giro = 0) {
@@ -317,14 +346,15 @@ function recorteVisible(video, giro = 0) {
   const ew = video.clientWidth || vw, eh = video.clientHeight || vh;
   const escala = Math.max(ew / vw, eh / vh);
   const visW = Math.min(vw, ew / escala), visH = Math.min(vh, eh / escala);
-  const w = Math.round(visW), h = Math.round(visH * 0.8);
+  const w = Math.round(visW * 0.95), h = Math.round(visH * 0.65); // el marco ocupa el 85 % × 50 %
   const x = Math.round((vw - w) / 2), y = Math.round((vh - h) / 2);
-  if (lienzoEscaner.width !== w || lienzoEscaner.height !== h) { lienzoEscaner.width = w; lienzoEscaner.height = h; }
-  const ctx = lienzoEscaner.getContext('2d', { willReadFrequently: true });
-  if (!giro) ctx.drawImage(video, x, y, w, h, 0, 0, w, h);
+  const k = Math.min(1, MAX_ANCHO / w), lw = Math.round(w * k), lh = Math.round(h * k);
+  if (lienzoEscaner.width !== lw || lienzoEscaner.height !== lh) { lienzoEscaner.width = lw; lienzoEscaner.height = lh; }
+  const ctx = lienzoEscaner.getContext('2d');
+  if (!giro) ctx.drawImage(video, x, y, w, h, 0, 0, lw, lh);
   else {
-    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
-    ctx.save(); ctx.translate(w / 2, h / 2); ctx.rotate(-giro); ctx.drawImage(video, -vw / 2, -vh / 2); ctx.restore();
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, lw, lh);
+    ctx.save(); ctx.translate(lw / 2, lh / 2); ctx.rotate(-giro); ctx.scale(k, k); ctx.drawImage(video, -vw / 2, -vh / 2); ctx.restore();
   }
   return lienzoEscaner;
 }
