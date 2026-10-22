@@ -18,7 +18,7 @@ const Escaner = {
   encendiendo: false,
   pendiente: false,
   zoom: 1,
-  camaras: [],    // cámaras traseras del dispositivo (se conocen tras dar permiso)
+  camaras: [],    // cámaras del dispositivo, traseras primero (se conocen tras dar permiso)
 
   // Marcado del escáner. Tras pintarlo hay que llamar a Escaner.montar(alLeer).
   html(pista) {
@@ -47,7 +47,7 @@ const Escaner = {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('este navegador no permite usar la cámara (¿la página no es https?)');
       const motor = prepararDetector(); // se carga a la vez que se abre la cámara
       flujo = await conLimite(abrirCamara(), 10000, 'la cámara no responde. Ciérrala en otras aplicaciones o pestañas y reintenta');
-      this.camaras = await camarasTraseras();
+      this.camaras = await camarasDisponibles();
       flujo = await conLimite(camaraConEnfoque(flujo, this.camaras), 15000, 'la cámara no responde. Ciérrala en otras aplicaciones o pestañas y reintenta');
       if (!document.body.contains(caja)) { detener(flujo); return; } // se cambió de pantalla mientras tanto
       const pista = flujo.getVideoTracks()[0];
@@ -233,14 +233,24 @@ async function abrirCamara() {
 // cerca ve la etiqueta borrosa (medido: 0–1 lecturas en 30 s frente a 20 lecturas con la principal). La
 // primera vez, si la cámara abierta no tiene autoenfoque, se prueban las demás traseras y se queda la
 // primera que lo tenga (mejor si además tiene linterna, que suele indicar la principal). Se recuerda.
+// En ordenadores (p. ej. Surface) la cámara por defecto suele ser la frontal aunque se pida la trasera:
+// si se sabe cuál es la trasera por su nombre, se cambia a ella. iPhone y Firefox no informan del modo de
+// enfoque: ahí no se prueban cámaras (abrirlas una a una solo haría esperar).
 const tieneAutoenfoque = pista => (capacidades(pista).focusMode || []).includes('continuous');
 async function camaraConEnfoque(flujo, camaras) {
-  const pista = flujo.getVideoTracks()[0];
-  const actual = (pista.getSettings ? pista.getSettings() : {}).deviceId;
-  if (camaraGuardada() || camaras.length < 2 || tieneAutoenfoque(pista)) return flujo;
+  let pista = flujo.getVideoTracks()[0];
+  let actual = (pista.getSettings ? pista.getSettings() : {}).deviceId;
+  if (camaraGuardada() || !camaras.length) return flujo;
+  if (actual && camaras.some(esTrasera) && !camaras.some(c => esTrasera(c) && c.deviceId === actual)) {
+    detener(flujo);
+    try { flujo = await abrirId(camaras[0].deviceId); } catch (e) { return abrirId(actual); }
+    pista = flujo.getVideoTracks()[0]; actual = camaras[0].deviceId;
+  }
+  const traseras = camaras.filter(esTrasera);
+  if (traseras.length < 2 || !capacidades(pista).focusMode || tieneAutoenfoque(pista)) return flujo;
   detener(flujo); // en Android no se pueden abrir dos cámaras a la vez
   let elegido = null, elegidoId = null;
-  for (const c of camaras.filter(c => c.deviceId !== actual)) {
+  for (const c of traseras.filter(c => c.deviceId !== actual)) {
     let otro;
     try { otro = await abrirId(c.deviceId); } catch (e) { continue; }
     const p = otro.getVideoTracks()[0];
@@ -254,13 +264,14 @@ async function camaraConEnfoque(flujo, camaras) {
   return actual ? abrirId(actual) : abrirCamara(); // ninguna tiene autoenfoque: se vuelve a la de antes
 }
 
-// Cámaras traseras (los nombres solo se conocen después de dar permiso). Si no se distingue cuáles son
-// traseras (ordenadores), se devuelven todas.
-async function camarasTraseras() {
+// Cámaras del dispositivo para el botón «Cámara n/N»: primero las traseras y después las demás (en una
+// Surface apoyada en la mesa es cómodo enseñar la etiqueta a la frontal). Los nombres solo se conocen tras
+// dar permiso. Se excluyen las de infrarrojos (Windows Hello).
+const esTrasera = c => /back|rear|trasera|posterior|environment/i.test(c.label);
+async function camarasDisponibles() {
   try {
-    const todas = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput' && d.deviceId);
-    const traseras = todas.filter(d => /back|rear|trasera|posterior|environment/i.test(d.label));
-    return traseras.length ? traseras : todas;
+    const todas = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput' && d.deviceId && !/\bIR\b|infrared|infrarroj/i.test(d.label));
+    return [...todas.filter(esTrasera), ...todas.filter(c => !esTrasera(c))];
   } catch (e) { return []; }
 }
 const indiceCamara = (lista, id) => Math.max(0, lista.findIndex(c => c.deviceId === id));
@@ -358,6 +369,29 @@ function recorteVisible(video, giro = 0) {
   }
   return lienzoEscaner;
 }
+
+// Se carga el lector en segundo plano al entrar el profesorado, para que la cámara lea desde el primer momento
+function precargarEscaner() {
+  if (navigator.connection && navigator.connection.saveData) return;
+  (window.requestIdleCallback || setTimeout)(() => prepararDetector().catch(() => {}));
+}
+
+// Lectores de códigos USB o Bluetooth (recomendados en el ordenador del almacén): escriben el código muy
+// deprisa, como un teclado, y pulsan Intro. Se recoge aunque el cursor no esté en la casilla del código,
+// salvo si se está escribiendo en otra casilla. Una persona no teclea tan rápido (menos de 50 ms por tecla).
+const lector = { texto: '', t: 0 };
+document.addEventListener('keydown', e => {
+  if (!Escaner.alLeer || !document.getElementById('codigoManual')) return;
+  const el = document.activeElement;
+  if (el && (el.id === 'codigoManual' || /INPUT|TEXTAREA|SELECT/.test(el.tagName) || el.isContentEditable)) return;
+  const ahora = performance.now();
+  if (ahora - lector.t > 50) lector.texto = '';
+  lector.t = ahora;
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    if (lector.texto.length >= 3) { e.preventDefault(); Escaner.leido(lector.texto, true); }
+    lector.texto = '';
+  } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) lector.texto += e.key;
+});
 
 let audio;
 function pitido() {

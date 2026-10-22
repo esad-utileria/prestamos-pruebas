@@ -140,7 +140,7 @@ function vSolicitudesAlumno() {
         ${s.estado === 'Citada' ? `<div class="callout violet">Cita: <b>${fmtCita(s.cita)}</b> ${RESP_CITA[s.respuestaCita || '']}</div>` : ''}
         <div class="small" style="color:var(--primary);font-weight:600">${s.estado === 'Pendiente' ? 'Ver y editar ›' : s.estado === 'Citada' && !s.respuestaCita ? 'Responder a la cita ›' : 'Ver detalle ›'}</div></a>`).join('')
         || '<p class="muted">Todavía no has hecho ninguna solicitud.</p>';
-    }).catch(e => { $('#listaSol').innerHTML = `<p>${esc(e.message)}</p>`; });
+    }).catch(e => errorEn('#listaSol', e));
   return `<div class="stack"><div class="row"><h1>Mis solicitudes</h1><span class="spacer"></span><a class="btn ghost sm" href="${sol.cesta.length ? '#solicitar' : '#catalogo'}">${sol.cesta.length ? `Continuar (${sol.cesta.length})` : '+ Nueva'}</a></div>
     <p class="hint">Las solicitudes las revisa y aprueba siempre un docente.</p>
     <div class="stack" id="listaSol">${esqueleto(3)}</div></div>`;
@@ -212,7 +212,7 @@ async function responderCita(id, respuesta) {
 
 // ---------- Mis préstamos ----------
 function vMis() {
-  alMontar = () => datosAlDia('mis', () => Promise.all([api('prestamos', { todos: true }), api('solicitudes', { mias: true })]), ([ps, ls]) => {
+  alMontar = () => datosAlDia('mis', () => apiVarias([['prestamos', { todos: true }], ['solicitudes', { mias: true }]]), ([ps, ls]) => {
       sol.lista = ls;
       const activos = ps.filter(p => p.lineas.some(l => !l.devuelto)), hist = ps.filter(p => !p.lineas.some(l => !l.devuelto));
       const citas = ls.filter(s => s.estado === 'Citada');
@@ -225,7 +225,7 @@ function vMis() {
           || '<p class="muted">No tienes préstamos en curso.</p>'}
         ${hist.length ? `<h2>Historial</h2><div class="list">${hist.map(p => `<div class="li"><div class="grow"><div class="title">${esc(p.asignatura)}</div><div class="small muted">${fmt(p.inicio)} – ${fmt(p.fin)} · ${nArt(p.lineas.length)}</div></div><span class="badge b-info">Devuelto</span></div>`).join('')}</div>` : ''}`;
       observarFotos();
-    }).catch(e => { $('#misCont').innerHTML = `<p>${esc(e.message)}</p>`; });
+    }).catch(e => errorEn('#misCont', e));
   return `<div class="stack"><h1>Mis préstamos</h1><div class="stack" id="misCont">${esqueleto(3)}</div></div>`;
 }
 

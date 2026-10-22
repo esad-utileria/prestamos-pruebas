@@ -28,7 +28,12 @@ async function articuloAlDia(a, valido) {
 
 // ---------- Inicio ----------
 function vInicio() {
-  alMontar = () => datosAlDia('inicio', () => Promise.all([api('prestamos'), api('solicitudes'), api('incidencias')]), ([ps, sols, incs]) => {
+  // Una sola petición para todo, y lo recibido sirve también para abrir al instante Solicitudes, Préstamos e Incidencias
+  alMontar = () => datosAlDia('inicio', async () => {
+    const r = await apiVarias([['prestamos'], ['solicitudes'], ['incidencias']]);
+    ['prestamos', 'solicitudes', 'incidencias'].forEach((k, i) => guardarDatos(k, r[i]));
+    return r;
+  }, ([ps, sols, incs]) => {
       op.prestamos = ps; gs.lista = sols;
       const retraso = ps.filter(vencido);
       const pend = sols.filter(s => s.estado === 'Pendiente');
@@ -53,7 +58,7 @@ function vInicio() {
         abiertas.length ? `<a class="callout warn small" href="#incidencias" style="display:block;text-decoration:none;color:inherit"><b>${abiertas.length} incidencia(s) abierta(s)</b> · Ver incidencias ›</a>` : ''
       ].join('') || '<p class="muted">Todo al día: no hay solicitudes, citas ni retrasos pendientes.</p>';
       observarFotos();
-    }).catch(e => { $('#inicioCont').innerHTML = `<p>${esc(e.message)}</p>`; });
+    }).catch(e => errorEn('#inicioCont', e));
   const fecha = hoy().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
   return `<div class="stack">
     <div class="hero azulejo"><h1>Hola${state.usuario.nombre ? ', ' + esc(state.usuario.nombre) : ''}</h1><p class="muted" style="margin:4px 0 14px">${esc(fecha[0].toUpperCase() + fecha.slice(1))}</p>
@@ -120,6 +125,7 @@ function vPrestar() {
 }
 
 function pintarAlumnos() {
+  if (!$('#listaAlumnos')) return; // ya se ha cambiado de pantalla
   const q = ($('#buscaAlumno') || {}).value ? $('#buscaAlumno').value.trim().toLowerCase() : '';
   const lista = (op.usuarios || []).filter(u => !q || (u.nombre + ' ' + u.email).toLowerCase().includes(q)).slice(0, 30);
   const esCorreo = esCorreoValido(q);
@@ -220,7 +226,7 @@ function vDevolver() {
     pintarDevoluciones();
     cargarLibres();
     datosAlDia('prestamos', () => api('prestamos'), ps => { op.prestamos = ps; $('#devPrestamos').innerHTML = ps.map(liPrestamo).join('') || '<div class="li muted small">No hay préstamos activos</div>'; })
-      .catch(e => { $('#devPrestamos').innerHTML = `<div class="li small">${esc(e.message)}</div>`; });
+      .catch(e => errorEn('#devPrestamos', e));
   };
   return `<div class="stack"><h1>Devolver</h1>
     ${Escaner.html('Escanea cada artículo que vuelve')}
@@ -271,7 +277,7 @@ function vActivos() {
       $('#activosChips').innerHTML = [['todos', `Todos · ${ps.length}`], ['retraso', `Con retraso · ${ps.filter(vencido).length}`]]
         .map(([k, t]) => `<button class="chip ${filtro === k ? 'on' : ''}" onclick="state.filtroActivos='${k}';render()">${t}</button>`).join('');
       $('#activosLista').innerHTML = lista.map(liPrestamo).join('') || '<div class="li muted small">No hay préstamos</div>';
-    }).catch(e => { $('#activosLista').innerHTML = `<div class="li small">${esc(e.message)}</div>`; });
+    }).catch(e => errorEn('#activosLista', e));
   return `<div class="stack"><h1>Préstamos activos</h1><div class="chips" id="activosChips"></div><div class="list" id="activosLista">${cargando}</div></div>`;
 }
 
@@ -291,7 +297,7 @@ function vPrestamo(id) {
           ${l.devuelto ? '<span class="badge b-info">Devuelto</span>' : `<button class="chip" onclick="devolverUno('${esc(l.id)}')">Devolver</button>`}</div>`; }).join('')}</div>
         ${pendientes(p).length ? `<button class="btn block" id="btnDevolver" onclick="registrarDevoluciones('${esc(p.id)}')">Devolver todo</button>` : ''}`;
       observarFotos();
-    }).catch(e => { $('#detPrestamo').innerHTML = `<p>${esc(e.message)}</p>`; });
+    }).catch(e => errorEn('#detPrestamo', e));
   return `<div class="stack"><a href="#activos" class="small" style="color:var(--primary);text-decoration:none">← Préstamos activos</a><div class="stack" id="detPrestamo">${esqueleto(3)}</div></div>`;
 }
 async function devolverUno(id) {
@@ -526,11 +532,12 @@ const gs = { tab: 'Pendiente', lista: null, citando: null };
 
 function vSolicitudesDocente() {
   alMontar = async () => {
-    datosAlDia('solicitudes', () => api('solicitudes'), ls => { gs.lista = ls; pintarSolicitudes(); }).catch(e => { $('#solDoc').innerHTML = `<p>${esc(e.message)}</p>`; });
+    datosAlDia('solicitudes', () => api('solicitudes'), ls => { gs.lista = ls; pintarSolicitudes(); }).catch(e => errorEn('#solDoc', e));
   };
   return `<div class="stack"><h1>Solicitudes</h1><div class="chips" id="solTabs"></div><div class="stack" id="solDoc">${esqueleto(2)}</div></div>`;
 }
 function pintarSolicitudes() {
+  if (!$('#solDoc')) return;
   const ls = gs.lista || [];
   const cuenta = e => ls.filter(s => s.estado === e).length;
   const atencion = ls.filter(necesitaAtencion).length;
@@ -578,8 +585,14 @@ async function accionSolicitud(id, accion, datos, mensaje) {
   vecinos.forEach(b => { b.disabled = true; });
   if (btn) btn.textContent = 'Enviando…';
   try {
-    await api(accion, { id, ...datos }); toast(mensaje); gs.lista = null; gs.citando = null; render();
-    refrescarCatalogo().then(() => { if (location.hash === '#solicitudes') render(); });
+    await api(accion, { id, ...datos }); toast(mensaje); gs.citando = null;
+    // Solicitudes y catálogo al día en una sola petición, y se repinta una vez
+    try {
+      const [ls, arts] = await apiVarias([['solicitudes'], ['catalogo']]);
+      guardarDatos('solicitudes', ls); gs.lista = ls;
+      state.articulos = arts; catalogoEn = Date.now(); recuerdo.guardar();
+    } catch (x) { gs.lista = null; }
+    if (location.hash === '#solicitudes') render();
   } catch (e) {
     if (e.codigo === 409) gs.citando = null;
     vecinos.forEach(b => { b.disabled = false; });
@@ -654,7 +667,7 @@ function vUsuarios() {
       $('#listaUsuarios').innerHTML = op.usuarios.slice().sort((a, b) => orden[a.rol] - orden[b.rol] || a.email.localeCompare(b.email)).map(u => `<div class="li">
         <div class="avatar soft">${initials(u.nombre || u.email)}</div><div class="grow"><div class="title">${esc(u.nombre || u.email)}</div><div class="small muted">${esc(u.email)}</div></div>
         ${admin ? `<select class="input" style="width:auto;min-height:38px" onchange="cambiarRol('${esc(u.email)}', this.value)">${['Alumno', 'Docente', 'Administrador'].map(r => `<option ${u.rol === r ? 'selected' : ''}>${r}</option>`).join('')}</select>` : `<span class="badge b-info">${esc(u.rol)}</span>`}</div>`).join('');
-    }).catch(e => { $('#listaUsuarios').innerHTML = `<div class="li">${esc(e.message)}</div>`; });
+    }).catch(e => errorEn('#listaUsuarios', e));
   return `<div class="stack"><h1>Usuarios y roles</h1>
     <p class="small muted">Cualquier cuenta @${esc(C.dominio)} entra como alumno. Aquí se indica quién es docente o administrador. ${admin ? 'Los cambios se aplican en unos minutos.' : 'Solo un administrador puede cambiar roles.'}</p>
     ${admin ? `<form class="row" onsubmit="event.preventDefault();cambiarRol(this.e.value.trim().toLowerCase(), 'Docente')"><input class="input" name="e" placeholder="correo@${esc(C.dominio)}"><button class="btn" type="submit">Añadir docente</button></form>` : ''}
@@ -671,7 +684,7 @@ function vIncidencias() {
         <div class="grow"><div class="title">${esc(i.desc || i.articulo)}</div><div class="small">${esc(i.texto)}</div><div class="small muted">${fmt(i.fecha)} · ${esc(i.por)}</div></div>
         ${i.estado === 'Abierta' ? `<button class="chip" onclick="cerrarIncidencia('${esc(i.id)}')">Cerrar</button>` : '<span class="badge b-info">Cerrada</span>'}</div>`).join('') || '<div class="li muted small">No hay incidencias</div>';
       observarFotos();
-    }).catch(e => { $('#listaInc').innerHTML = `<div class="li">${esc(e.message)}</div>`; });
+    }).catch(e => errorEn('#listaInc', e));
   return `<div class="stack"><h1>Incidencias</h1><div class="list" id="listaInc">${cargando}</div>
     <p class="hint">Para registrar un daño, abre el artículo desde el catálogo y pulsa «Registrar daño».</p></div>`;
 }

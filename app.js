@@ -53,7 +53,12 @@ function iniciarGoogle() {
   if (!C.cuentasExternas) opciones.hd = C.dominio;
   google.accounts.id.initialize(opciones);
 }
+// Correo de la sesión guardada (para recuperar lo último que vio en este dispositivo)
+function emailToken() {
+  try { return JSON.parse(atob(tokenGuardado().split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).email.toLowerCase(); } catch (e) { return null; }
+}
 function cerrarSesion() {
+  recuerdo.borrar();
   store.del('token'); store.del('token_exp');
   if (window.google) google.accounts.id.disableAutoSelect();
   state.usuario = null; location.hash = ''; vLogin();
@@ -66,7 +71,7 @@ function cerrarSesion() {
 //   falla, se reintentan con la misma clave y el servidor no las ejecuta dos veces.
 // - Una escritura idéntica que ya está en marcha (doble pulsación) no se envía otra vez.
 // - Tras guardar algo, las listas en memoria se marcan como desfasadas.
-const SOLO_LECTURA = new Set(['diagnosticoEscaner', 'yo', 'catalogo', 'fotos', 'usuarios', 'prestamos', 'buscarCodigo', 'codigos', 'solicitudes', 'incidencias']);
+const SOLO_LECTURA = new Set(['lote', 'registroWeb', 'diagnosticoEscaner', 'yo', 'catalogo', 'fotos', 'usuarios', 'prestamos', 'buscarCodigo', 'codigos', 'solicitudes', 'incidencias']);
 const enVuelo = new Map(); // escrituras en marcha: clave -> promesa
 let pendientesApi = 0, temporizadorBarra = null;
 function progreso(delta) {
@@ -88,11 +93,21 @@ function api(accion, datos) {
   return p;
 }
 
+// Varias consultas en una sola petición (cada petición a Apps Script cuesta ~1 s de por sí).
+// Recibe [[accion, datos], …] y devuelve los resultados en el mismo orden.
+async function apiVarias(peticiones, intento = 1) {
+  const res = await api('lote', { peticiones: peticiones.map(([accion, datos]) => ({ accion, datos: datos || {} })) });
+  // Un fallo puntual de Google (500) en alguna consulta: se repite el lote una vez
+  if (intento < 2 && res.some(r => !r.ok && r.codigo === 500)) { await new Promise(ok => setTimeout(ok, 800)); return apiVarias(peticiones, intento + 1); }
+  return res.map(r => { if (r.ok) return r.datos; const e = new Error(r.error); e.codigo = r.codigo; throw e; });
+}
+
 async function llamar(accion, datos, idem, intento = 1) {
   if (!C.apiUrl) throw new Error('Falta configurar la URL de la API en config.js');
   const token = tokenGuardado();
   if (!token) { vLogin('Tu sesión ha caducado. Vuelve a entrar.'); throw new Error('sin sesión'); }
   let res;
+  const t0 = Date.now();
   progreso(1);
   try {
     const r = await fetch(C.apiUrl, {
@@ -113,6 +128,10 @@ async function llamar(accion, datos, idem, intento = 1) {
       : idem ? 'El servidor no ha confirmado la operación. Inténtalo de nuevo: no se duplicará.'
       : 'El servidor no ha respondido. Comprueba la conexión e inténtalo de nuevo.');
   } finally { progreso(-1); }
+  const ms = Date.now() - t0;
+  if (ms > 8000 && accion !== 'registroWeb') registroWeb('lento', accion + ' tardó ' + ms + ' ms' + (intento > 1 ? ' (intento ' + intento + ')' : ''));
+  // 500 en una consulta: suele ser un fallo pasajero de Google (hoja ocupada). Se repite sola.
+  if (!res.ok && res.codigo === 500 && !idem && intento < 3) { await new Promise(ok => setTimeout(ok, 1000 * intento)); return llamar(accion, datos, idem, intento + 1); }
   // 503: otra operación tenía el turno de escritura. Se reintenta solo (con la misma clave no se duplica nada).
   if (!res.ok && res.codigo === 503 && intento < 3) { await new Promise(ok => setTimeout(ok, 1500 * intento)); return llamar(accion, datos, idem, intento + 1); }
   if (!res.ok) {
@@ -134,14 +153,17 @@ async function llamar(accion, datos, idem, intento = 1) {
 // - Y lo esencial: el servidor comprueba cada operación contra la hoja real (bajo bloqueo) y, si la web
 //   estaba desfasada, responde 409 sin aplicar nada; la web se pone al día y lo explica.
 let catalogoEn = 0, revalidando = null, ocultaDesde = 0;
-const cacheDatos = new Map(); // clave -> datos ya pintados
+const cacheDatos = new Map(); // clave -> { datos ya pintados, t: cuándo llegaron }
+const cargasEnCurso = new Map(); // clave -> petición en marcha
+const guardarDatos = (clave, datos) => cacheDatos.set(clave, { datos, t: Date.now() });
+const RECIENTE = 5000; // datos de hace menos de 5 s (p. ej. recién cargados en Inicio): no se vuelven a pedir
 function revalidarCatalogo(forzar) {
   if (revalidando) return revalidando;
   if (!forzar && Date.now() - catalogoEn < 30000) return Promise.resolve(false);
   revalidando = (async () => {
     try {
       const antes = JSON.stringify(state.articulos);
-      state.articulos = await api('catalogo'); catalogoEn = Date.now();
+      state.articulos = await api('catalogo'); catalogoEn = Date.now(); recuerdo.guardar();
       return JSON.stringify(state.articulos) !== antes;
     } finally { revalidando = null; }
   })();
@@ -173,14 +195,19 @@ function avisoDatosNuevos(accion) {
 // Pinta los datos de una pantalla con stale-while-revalidate. `cargar` los pide al servidor y `pintar`
 // los dibuja en su contenedor. Si la persona cambia de pantalla mientras tanto, no se pinta nada.
 async function datosAlDia(clave, cargar, pintar) {
-  const hash = location.hash, previos = cacheDatos.get(clave);
-  if (previos !== undefined) pintar(previos);
+  const hash = location.hash, guardado = cacheDatos.get(clave), previos = guardado && guardado.datos;
+  if (guardado) pintar(previos);
+  if (guardado && Date.now() - guardado.t < RECIENTE) return previos;
   let nuevos;
-  try { nuevos = await cargar(); }
-  catch (e) { if (previos === undefined) throw e; toast(e.message); return previos; }
-  cacheDatos.set(clave, nuevos);
+  // Si la misma pantalla se repinta mientras sus datos aún están llegando, se espera a esa misma petición
+  try {
+    if (!cargasEnCurso.has(clave)) cargasEnCurso.set(clave, cargar().finally(() => cargasEnCurso.delete(clave)));
+    nuevos = await cargasEnCurso.get(clave);
+  }
+  catch (e) { if (!guardado) throw e; toast(e.message); return previos; }
+  guardarDatos(clave, nuevos);
   if (location.hash !== hash) return nuevos;
-  if (previos === undefined) pintar(nuevos);
+  if (!guardado) pintar(nuevos);
   else if (JSON.stringify(previos) !== JSON.stringify(nuevos)) {
     if (ocupadoEditando()) avisoDatosNuevos(() => { avisoDatosNuevos(null); pintar(nuevos); });
     else { const y = window.scrollY; pintar(nuevos); window.scrollTo(0, y); }
@@ -190,6 +217,11 @@ async function datosAlDia(clave, cargar, pintar) {
 // Filas grises mientras llega algo que nunca se había cargado (en lugar de un "Cargando…")
 const esqueleto = (n = 3) => `<div class="list">${Array.from({ length: n }, () => '<div class="li esq"><div class="esq-b" style="width:40px;height:40px;border-radius:50%"></div><div class="grow"><div class="esq-b" style="width:60%"></div><div class="esq-b" style="width:35%;margin-top:6px"></div></div></div>').join('')}</div>`;
 
+// Una lista que no se ha podido cargar: el motivo y un botón para reintentar (si la pantalla sigue abierta)
+function errorEn(sel, e) {
+  const el = $(sel);
+  if (el) el.innerHTML = `<div class="callout warn small stack"><span>${esc(e.message)}</span><button class="btn ghost sm" onclick="render()">Reintentar</button></div>`;
+}
 // Tras un error: avisa y, si era un conflicto (409), repinta con los datos ya actualizados
 function fallo(e) {
   toast(e.message);
@@ -507,17 +539,41 @@ function vPronto() {
 }
 
 // ---------- Arranque ----------
+// Lo último que vio cada persona en este dispositivo (su usuario, las listas y el catálogo) se guarda para
+// pintar la web al instante la próxima vez, mientras llegan los datos frescos. Se borra al cerrar sesión.
+const recuerdo = {
+  clave: () => emailToken() && 'utileria:' + emailToken(),
+  leer() { if (!this.clave()) return null; try { const r = JSON.parse(localStorage.getItem(this.clave())); return r && r.v === 1 ? r : null; } catch (e) { return null; } },
+  guardar() {
+    if (!this.clave()) return;
+    try { localStorage.setItem(this.clave(), JSON.stringify({ v: 1, usuario: state.usuario, maestros: state.maestros, fotosPublicas: state.fotosPublicas, articulos: state.articulos })); }
+    catch (e) { /* sin espacio o sin almacenamiento */ }
+  },
+  borrar() { try { Object.keys(localStorage).filter(k => k.startsWith('utileria:')).forEach(k => localStorage.removeItem(k)); } catch (e) { /* nada */ } }
+};
+
 async function arrancar() {
-  $('#root').innerHTML = '<div class="login azulejo"><div class="box"><p class="muted">Cargando el catálogo…</p></div></div>';
-  try {
-    const yo = await api('yo');
-    state.usuario = yo.usuario; state.maestros = yo.maestros; state.fotosPublicas = !!yo.fotosPublicas;
-    await revalidarCatalogo(true);
+  const previo = !state.usuario && recuerdo.leer();
+  if (previo) {
+    // Se pinta ya lo último conocido; los datos frescos llegan en segundo plano
+    Object.assign(state, { usuario: previo.usuario, maestros: previo.maestros, fotosPublicas: previo.fotosPublicas, articulos: previo.articulos });
+    catalogoEn = Date.now(); // el catálogo fresco ya viene en camino: no se pide otra vez al navegar
     render();
+  } else if (!state.usuario) $('#root').innerHTML = '<div class="login azulejo"><div class="box"><p class="muted">Cargando el catálogo…</p></div></div>';
+  try {
+    const antes = JSON.stringify([state.usuario, state.maestros, state.articulos]);
+    const [yo, articulos] = await apiVarias([['yo'], ['catalogo']]);
+    const cambioRol = previo && previo.usuario.rol !== yo.usuario.rol;
+    Object.assign(state, { usuario: yo.usuario, maestros: yo.maestros, fotosPublicas: !!yo.fotosPublicas, articulos });
+    catalogoEn = Date.now();
+    recuerdo.guardar();
+    if (!previo || cambioRol) render();
+    else if (JSON.stringify([state.usuario, state.maestros, state.articulos]) !== antes) repintarSiSeguro(VISTAS_CONSULTA);
     setTimeout(precargarFotos, 1500);
+    if (esDocente() && typeof precargarEscaner === 'function') setTimeout(precargarEscaner, 3000);
   } catch (e) {
     if (e.message !== 'sin sesión' && state.usuario !== null) toast(e.message);
-    if (!tokenGuardado()) return;
+    if (!tokenGuardado() || previo) return; // con datos guardados se sigue trabajando con ellos
     $('#root').innerHTML = `<div class="login azulejo"><div class="box stack"><h1>No se ha podido cargar</h1><p class="muted">${esc(e.message)}</p><button class="btn" onclick="arrancar()">Reintentar</button><button class="btn ghost" onclick="cerrarSesion()">Cerrar sesión</button></div></div>`;
   }
 }
@@ -553,6 +609,16 @@ function arranque() {
   marcarEntorno();
   if (tokenGuardado()) arrancar(); else vLogin();
 }
+
+// Errores de la web y peticiones lentas: se anotan en el Log (como mucho 10 por sesión) para poder
+// depurar lo que pasa en los dispositivos reales.
+let avisosWeb = 0;
+function registroWeb(tipo, detalle) {
+  if (avisosWeb++ >= 10 || !state.usuario || !tokenGuardado()) return;
+  api('registroWeb', { tipo, detalle: String(detalle).slice(0, 1500), pantalla: location.hash, dispositivo: navigator.userAgent }).catch(() => {});
+}
+window.addEventListener('error', e => e.filename && registroWeb('error', (e.message || '') + ' @ ' + (e.filename || '').split('/').pop() + ':' + e.lineno));
+window.addEventListener('unhandledrejection', e => { const r = e.reason; if ((r && r.codigo) || (r && r.message === 'sin sesión')) return; registroWeb('error', 'Promesa: ' + (r && (r.stack || r.message) || r)); });
 
 // En el entorno de pruebas se marca siempre, para que nadie lo confunda con el de producción.
 function marcarEntorno() {
