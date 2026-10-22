@@ -16,7 +16,9 @@
 const MOTOR_ZXING = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.1/dist/iife/ponyfill.js';
 // Sin Code 39: las etiquetas son Code 128 y el 39 daba lecturas falsas con textos y códigos cercanos
 const FORMATOS = ['code_128', 'qr_code', 'ean_13', 'ean_8'];
-const CANDIDATO_MS = 700; // un código apuntado sigue valiendo para «tocar» hasta 0,7 s después de verlo
+const CANDIDATO_MS = 700; // un código apuntado sigue valiendo para «tocar» hasta 0,7 s después de verlo…
+// …o hasta 4 fotogramas en equipos lentos, donde cada fotograma tarda más (si no, nunca llegaría a ESTABLE)
+const vigencia = a => Math.max(CANDIDATO_MS, (a.msZxing || 0) * 4);
 const ESTABLE = 3;        // modo automático: fotogramas seguidos con el mismo código bajo la línea
 
 const Escaner = {
@@ -104,11 +106,18 @@ const Escaner = {
         const detector = usarZxing ? d.zxing : d.nativo;
         if (detector) {
           // ZXing solo lee códigos de barras casi horizontales: prueba también con el fotograma girado
-          const giro = usarZxing ? GIROS[Math.floor(n / (d.nativo ? 2 : 1)) % GIROS.length] : 0;
+          // En equipos lentos (p. ej. Surface Go) se analiza menos imagen y se prueban menos giros
+          const giros = a.ligero ? GIROS_LIGERO : GIROS;
+          const giro = usarZxing ? giros[Math.floor(n / (d.nativo ? 2 : 1)) % giros.length] : 0;
           const t0 = performance.now();
-          const lienzo = recorteVisible(a.video, giro);
+          const lienzo = recorteVisible(a.video, giro, a.ligero ? ANCHO_LIGERO : MAX_ANCHO);
           const codigos = await detector.detect(lienzo);
-          a.est.fotogramas++; a.est.ms += performance.now() - t0;
+          const ms = performance.now() - t0;
+          a.est.fotogramas++; a.est.ms += ms;
+          if (usarZxing) {
+            a.msZxing = a.msZxing ? a.msZxing * 0.8 + ms * 0.2 : ms;
+            if (!a.ligero && a.est.fotogramas >= 6 && a.msZxing > LENTO_MS) { a.ligero = true; a.est.ligero = true; this.mostrarControles(); }
+          }
           const cand = elegirCandidato(codigos, lienzo.width, lienzo.height, this.tipo);
           if (cand && this.activo === a) {
             a.fallos = 0; a.est[usarZxing ? 'zxing' : 'nativo']++;
@@ -117,7 +126,7 @@ const Escaner = {
         }
       } catch (e) { espera = 300; /* un fotograma que no se pudo leer: se sigue con el siguiente */ }
     } else espera = 200;
-    if (a.cand && Date.now() - a.cand.t > CANDIDATO_MS) { a.cand = null; this.pintarCandidato(); }
+    if (a.cand && Date.now() - a.cand.t > vigencia(a)) { a.cand = null; this.pintarCandidato(); }
     if (this.activo === a) a.temporizador = setTimeout(() => this.analizar(), espera);
   },
 
@@ -130,7 +139,7 @@ const Escaner = {
     if (this.modo === 'auto' && cand.centrado && a.cand.veces >= ESTABLE) { this.aceptar(a, a.cand.valor, false); return true; }
     return false;
   },
-  candidatoVigente() { const a = this.activo; return a && a.cand && Date.now() - a.cand.t < CANDIDATO_MS ? a.cand : null; },
+  candidatoVigente() { const a = this.activo; return a && a.cand && Date.now() - a.cand.t < vigencia(a) ? a.cand : null; },
   // Gatillo: lee el código que está apuntado ahora mismo
   disparar() {
     const a = this.activo, c = this.candidatoVigente();
@@ -169,7 +178,7 @@ const Escaner = {
     if (lente && n > 1) { lente.hidden = false; lente.textContent = 'Cámara ' + (indiceCamara(this.camaras, ajustes.deviceId) + 1) + '/' + n; }
     if (zoom && cap.zoom && cap.zoom.max >= 2) { zoom.hidden = false; zoom.textContent = 'Zoom ×' + redondo(this.zoom); }
     const info = document.getElementById('camaraInfo');
-    if (info) info.textContent = (ajustes.width || a.video.videoWidth) + '×' + (ajustes.height || a.video.videoHeight) + ' · ' + nombreMotor(a.detectores) + (cap.zoom ? ' · ×' + redondo(this.zoom) : '');
+    if (info) info.textContent = (ajustes.width || a.video.videoWidth) + '×' + (ajustes.height || a.video.videoHeight) + ' · ' + nombreMotor(a.detectores) + (a.ligero ? ' ligero' : '') + (cap.zoom ? ' · ×' + redondo(this.zoom) : '');
   },
 
   async luz() {
@@ -412,7 +421,7 @@ function enviarDiagnostico(a, zoom) {
     const cap = capacidades(a.pista), aj = a.pista.getSettings ? a.pista.getSettings() : {};
     api('diagnosticoEscaner', {
       dispositivo: navigator.userAgent, pantalla: location.hash, segundos: seg,
-      motor: nombreMotor(a.detectores), resolucion: (aj.width || a.video.videoWidth) + 'x' + (aj.height || a.video.videoHeight),
+      motor: nombreMotor(a.detectores) + (a.ligero ? ' ligero' : ''), resolucion: (aj.width || a.video.videoWidth) + 'x' + (aj.height || a.video.videoHeight),
       camara: (Escaner.camaras.find(c => c.deviceId === aj.deviceId) || {}).label || '', camaras: Escaner.camaras.map(c => c.label).join(' | '),
       zoom: redondo(zoom || 1), zoomMax: cap.zoom ? cap.zoom.max : null, enfoque: (cap.focusMode || []).join('/'), linterna: !!cap.torch,
       fotogramas: e.fotogramas, msPorFotograma: e.fotogramas ? Math.round(e.ms / e.fotogramas) : null,
@@ -428,14 +437,18 @@ const lienzoEscaner = document.createElement('canvas');
 const MAX_ANCHO = 1280;
 // ZXing tolera unos ±7° por intento: con pasos de 10° cubre etiquetas inclinadas hasta unos ±37°
 const GIROS = [0, 10, -10, 0, 20, -20, 0, 30, -30].map(g => g * Math.PI / 180);
-function recorteVisible(video, giro = 0) {
+// Modo ligero: si ZXing tarda más de LENTO_MS por fotograma, se analiza a 960 px y solo con giros de ±10°
+// (con la línea de mira la etiqueta suele ir casi horizontal). Así un procesador modesto lee varias veces por segundo.
+const LENTO_MS = 140, ANCHO_LIGERO = 960;
+const GIROS_LIGERO = [0, 10, 0, -10].map(g => g * Math.PI / 180);
+function recorteVisible(video, giro = 0, maxAncho = MAX_ANCHO) {
   const vw = video.videoWidth, vh = video.videoHeight;
   const ew = video.clientWidth || vw, eh = video.clientHeight || vh;
   const escala = Math.max(ew / vw, eh / vh);
   const visW = Math.min(vw, ew / escala), visH = Math.min(vh, eh / escala);
   const w = Math.round(visW * 0.95), h = Math.round(visH * 0.65); // el marco ocupa el 85 % × 50 %
   const x = Math.round((vw - w) / 2), y = Math.round((vh - h) / 2);
-  const k = Math.min(1, MAX_ANCHO / w), lw = Math.round(w * k), lh = Math.round(h * k);
+  const k = Math.min(1, maxAncho / w), lw = Math.round(w * k), lh = Math.round(h * k);
   if (lienzoEscaner.width !== lw || lienzoEscaner.height !== lh) { lienzoEscaner.width = lw; lienzoEscaner.height = lh; }
   const ctx = lienzoEscaner.getContext('2d');
   if (!giro) ctx.drawImage(video, x, y, w, h, 0, 0, lw, lh);
