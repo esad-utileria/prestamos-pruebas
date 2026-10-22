@@ -75,7 +75,7 @@ const Escaner = {
       const detectores = await conLimite(motor, 20000, 'no se ha podido cargar el lector de códigos. Revisa la conexión');
       if (!document.body.contains(video)) { detener(flujo); return; }
       this.activo = { flujo, video, pista, detectores, temporizador: 0, vuelta: 0, fallos: 0,
-        est: { inicio: Date.now(), fotogramas: 0, ms: 0, lecturas: 0, primera: 0, nativo: 0, zxing: 0 } };
+        est: { inicio: Date.now(), fotogramas: 0, ms: 0, lecturas: 0, primera: 0, nativo: 0, zxing: 0, volumen: 0 } };
       if (!detectores.zxing) cargarZxing(detectores); // refuerzo listo por si el nativo no lee
       await this.ponerZoom(zoomPreferido(pista));
       // Tocar el vídeo: lee el código apuntado (modo tocar) o, si no hay ninguno, enfoca en ese punto
@@ -425,7 +425,7 @@ function enviarDiagnostico(a, zoom) {
       camara: (Escaner.camaras.find(c => c.deviceId === aj.deviceId) || {}).label || '', camaras: Escaner.camaras.map(c => c.label).join(' | '),
       zoom: redondo(zoom || 1), zoomMax: cap.zoom ? cap.zoom.max : null, enfoque: (cap.focusMode || []).join('/'), linterna: !!cap.torch,
       fotogramas: e.fotogramas, msPorFotograma: e.fotogramas ? Math.round(e.ms / e.fotogramas) : null,
-      lecturas: e.lecturas, porNativo: e.nativo, porZxing: e.zxing, primeraLecturaMs: e.primera || null
+      lecturas: e.lecturas, porNativo: e.nativo, porZxing: e.zxing, primeraLecturaMs: e.primera || null, teclasVolumen: e.volumen
     }).catch(() => {});
   } catch (x) { /* el diagnóstico nunca debe molestar */ }
 }
@@ -469,6 +469,21 @@ function precargarEscaner() {
 // deprisa, como un teclado, y pulsan Intro. Se recoge aunque el cursor no esté en la casilla del código,
 // salvo si se está escribiendo en otra casilla. Una persona no teclea tan rápido (menos de 50 ms por tecla).
 const lector = { texto: '', t: 0 };
+// Botones de volumen del móvil (o un mando Bluetooth de foto, que envía «subir volumen») como gatillo, igual
+// que tocar la pantalla. Solo con la cámara encendida; el resto del tiempo el volumen funciona como siempre.
+// Depende del navegador: Chrome en Android entrega estas teclas a la página, Safari en iPhone no.
+const TECLAS_VOLUMEN = new Set(['AudioVolumeUp', 'AudioVolumeDown', 'VolumeUp', 'VolumeDown']);
+const CODIGOS_VOLUMEN = new Set([24, 25, 174, 175, 182, 183]);
+let ultimoVolumen = 0;
+document.addEventListener('keydown', e => {
+  if (!Escaner.activo || !(TECLAS_VOLUMEN.has(e.key) || CODIGOS_VOLUMEN.has(e.keyCode))) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  Escaner.activo.est.volumen++;
+  if (e.repeat || performance.now() - ultimoVolumen < 300) return; // botón mantenido pulsado: una sola lectura
+  ultimoVolumen = performance.now();
+  Escaner.disparar();
+}, true);
+
 document.addEventListener('keydown', e => {
   if (!Escaner.alLeer || !document.getElementById('codigoManual')) return;
   const el = document.activeElement;
