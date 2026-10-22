@@ -185,6 +185,10 @@ a.avatar { color: #fff; }
 .camara-off { text-align: center; padding: 24px; }
 .camara-marco { position: absolute; left: 7.5%; right: 7.5%; top: 25%; bottom: 25%; border: 3px solid rgba(255,255,255,.9); border-radius: 12px; pointer-events: none; box-shadow: 0 0 0 999px rgba(0,0,0,.25); }
 .camara-marco.leido { animation: camaraLeido .6s ease-out; }
+.camara-marco.apunta { border-color: #3BD16F; }
+.camara-mira { position: absolute; left: 4%; right: 4%; top: 50%; height: 2px; margin-top: -1px; background: rgba(255,59,48,.85); box-shadow: 0 0 6px rgba(255,59,48,.8); }
+.camara-apunta { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: 92%; border: 0; border-radius: 999px; padding: 8px 14px; font: inherit; font-size: 13px; font-weight: 600; background: rgba(17,21,28,.75); color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.camara-apunta.on { background: #3BD16F; color: #0B2A16; font-size: 15px; padding: 10px 18px; }
 @keyframes camaraLeido { from { border-color: #3BD16F; box-shadow: 0 0 0 999px rgba(59,209,111,.35); } }
 .camara-botones { position: absolute; top: 10px; right: 10px; left: 10px; display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .camara-botones [hidden] { display: none; }

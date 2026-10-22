@@ -87,7 +87,7 @@ function vPrestar() {
         const conocido = (op.usuarios || []).some(u => u.email === email);
         if (!conocido && !esCorreoValido(email)) return toast('Ese código no es el QR de un alumno');
         elegirAlumno((op.usuarios || []).find(u => u.email === email) || { email, nombre: '' });
-      });
+      }, 'persona');
       if (!op.usuarios) { try { op.usuarios = await api('usuarios'); } catch (e) { toast(e.message); } }
       pintarAlumnos();
     };

@@ -6,9 +6,18 @@
 // el nativo si este tarda en leer. Se pide a la cámara alta resolución, enfoque continuo y zoom ×2 (las
 // etiquetas son de 50 × 10 mm: de cerca no enfocan y de lejos las barras se funden), y se analiza a
 // resolución completa la parte del vídeo que se ve. Cada sesión deja un diagnóstico en el Log.
+//
+// Qué se da por leído (como una pistola lectora): solo el código que está bajo la línea roja del centro
+// (o el único que se ve) y solo si tiene sentido en esa pantalla (etiqueta ARTnnn, artículo conocido o
+// EAN; en el paso 1 de Prestar, el QR de una persona). Modo «tocar» (por defecto): el marco se pone
+// verde y enseña el código apuntado, y se lee al tocar el vídeo (o con Espacio/Intro en el ordenador).
+// Modo «automático»: se lee solo cuando el mismo código sigue bajo la línea 3 fotogramas seguidos.
 
 const MOTOR_ZXING = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.1/dist/iife/ponyfill.js';
-const FORMATOS = ['code_128', 'qr_code', 'code_39', 'ean_13', 'ean_8'];
+// Sin Code 39: las etiquetas son Code 128 y el 39 daba lecturas falsas con textos y códigos cercanos
+const FORMATOS = ['code_128', 'qr_code', 'ean_13', 'ean_8'];
+const CANDIDATO_MS = 700; // un código apuntado sigue valiendo para «tocar» hasta 0,7 s después de verlo
+const ESTABLE = 3;        // modo automático: fotogramas seguidos con el mismo código bajo la línea
 
 const Escaner = {
   activo: null,   // { flujo, video, pista, detectores, temporizador, vuelta, fallos, est }
@@ -19,8 +28,10 @@ const Escaner = {
   pendiente: false,
   zoom: 1,
   camaras: [],    // cámaras del dispositivo, traseras primero (se conocen tras dar permiso)
+  tipo: 'articulo', // qué códigos valen en la pantalla actual: 'articulo' o 'persona'
+  modo: (() => { try { return localStorage.getItem('camaraModo') === 'auto' ? 'auto' : 'tocar'; } catch (e) { return 'tocar'; } })(),
 
-  // Marcado del escáner. Tras pintarlo hay que llamar a Escaner.montar(alLeer).
+  // Marcado del escáner. Tras pintarlo hay que llamar a Escaner.montar(alLeer, tipo).
   html(pista) {
     return `<div class="camara" id="camara"><div class="camara-off"><button class="btn" onclick="Escaner.encender()">Activar cámara</button><div class="small" style="color:#fff;margin-top:8px">${esc(pista)}</div></div></div>
       <form class="row" onsubmit="event.preventDefault();Escaner.manual()">
@@ -29,8 +40,8 @@ const Escaner = {
       </form>`;
   },
 
-  montar(alLeer) {
-    this.alLeer = alLeer;
+  montar(alLeer, tipo = 'articulo') {
+    this.alLeer = alLeer; this.tipo = tipo;
     try { if (localStorage.getItem('camara') === 'si') this.encender(); } catch (e) { /* sin almacenamiento */ }
   },
 
@@ -52,8 +63,9 @@ const Escaner = {
       if (!document.body.contains(caja)) { detener(flujo); return; } // se cambió de pantalla mientras tanto
       const pista = flujo.getVideoTracks()[0];
       await ajustarCamara(pista);
-      caja.innerHTML = `<video id="camaraVideo" playsinline muted autoplay></video><div class="camara-marco" id="camaraMarco"></div>
-        <div class="camara-botones"><button class="btn ghost sm" id="camaraLente" hidden onclick="Escaner.cambiarCamara()">Cámara 1</button><button class="btn ghost sm" id="camaraLuz" hidden onclick="Escaner.luz()">Linterna</button><button class="btn ghost sm" id="camaraZoom" hidden onclick="Escaner.cambiarZoom()">Zoom ×1</button><button class="btn ghost sm" onclick="Escaner.apagar()">Parar</button></div>
+      caja.innerHTML = `<video id="camaraVideo" playsinline muted autoplay></video><div class="camara-marco" id="camaraMarco"><div class="camara-mira"></div></div>
+        <button class="camara-apunta" id="camaraApunta" onclick="Escaner.disparar()"></button>
+        <div class="camara-botones"><button class="btn ghost sm" id="camaraModo" onclick="Escaner.cambiarModo()"></button><button class="btn ghost sm" id="camaraLente" hidden onclick="Escaner.cambiarCamara()">Cámara 1</button><button class="btn ghost sm" id="camaraLuz" hidden onclick="Escaner.luz()">Linterna</button><button class="btn ghost sm" id="camaraZoom" hidden onclick="Escaner.cambiarZoom()">Zoom ×1</button><button class="btn ghost sm" onclick="Escaner.apagar()">Parar</button></div>
         <div class="camara-info" id="camaraInfo"></div>`;
       const video = caja.querySelector('video');
       video.srcObject = flujo;
@@ -64,7 +76,8 @@ const Escaner = {
         est: { inicio: Date.now(), fotogramas: 0, ms: 0, lecturas: 0, primera: 0, nativo: 0, zxing: 0 } };
       if (!detectores.zxing) cargarZxing(detectores); // refuerzo listo por si el nativo no lee
       await this.ponerZoom(zoomPreferido(pista));
-      video.onclick = ev => this.enfocar(ev);
+      // Tocar el vídeo: lee el código apuntado (modo tocar) o, si no hay ninguno, enfoca en ese punto
+      video.onclick = ev => { if (this.modo === 'tocar' && this.candidatoVigente()) this.disparar(); else this.enfocar(ev); };
       this.mostrarControles();
       try { localStorage.setItem('camara', 'si'); } catch (e) { /* sin almacenamiento */ }
       this.analizar();
@@ -93,18 +106,55 @@ const Escaner = {
           // ZXing solo lee códigos de barras casi horizontales: prueba también con el fotograma girado
           const giro = usarZxing ? GIROS[Math.floor(n / (d.nativo ? 2 : 1)) % GIROS.length] : 0;
           const t0 = performance.now();
-          const codigos = await detector.detect(recorteVisible(a.video, giro));
+          const lienzo = recorteVisible(a.video, giro);
+          const codigos = await detector.detect(lienzo);
           a.est.fotogramas++; a.est.ms += performance.now() - t0;
-          const bueno = codigos.find(c => c.rawValue && c.rawValue.trim());
-          if (bueno && this.activo === a) {
-            a.fallos = 0; a.est.lecturas++; a.est[usarZxing ? 'zxing' : 'nativo']++;
-            if (!a.est.primera) a.est.primera = Date.now() - a.est.inicio;
-            this.leido(bueno.rawValue); espera = 400;
+          const cand = elegirCandidato(codigos, lienzo.width, lienzo.height, this.tipo);
+          if (cand && this.activo === a) {
+            a.fallos = 0; a.est[usarZxing ? 'zxing' : 'nativo']++;
+            if (this.verCandidato(a, cand)) espera = 400;
           } else a.fallos++;
         }
       } catch (e) { espera = 300; /* un fotograma que no se pudo leer: se sigue con el siguiente */ }
     } else espera = 200;
+    if (a.cand && Date.now() - a.cand.t > CANDIDATO_MS) { a.cand = null; this.pintarCandidato(); }
     if (this.activo === a) a.temporizador = setTimeout(() => this.analizar(), espera);
+  },
+
+  // Un código apuntado en este fotograma. Devuelve true si se ha dado por leído (modo automático).
+  verCandidato(a, cand) {
+    const ahora = Date.now();
+    if (a.cand && a.cand.valor === cand.valor) { a.cand.veces++; a.cand.t = ahora; a.cand.centrado = cand.centrado; }
+    else a.cand = { valor: cand.valor, veces: 1, t: ahora, centrado: cand.centrado };
+    this.pintarCandidato();
+    if (this.modo === 'auto' && cand.centrado && a.cand.veces >= ESTABLE) { this.aceptar(a, a.cand.valor, false); return true; }
+    return false;
+  },
+  candidatoVigente() { const a = this.activo; return a && a.cand && Date.now() - a.cand.t < CANDIDATO_MS ? a.cand : null; },
+  // Gatillo: lee el código que está apuntado ahora mismo
+  disparar() {
+    const a = this.activo, c = this.candidatoVigente();
+    if (!c) { toast('Apunta la línea roja al código'); return; }
+    this.aceptar(a, c.valor, true);
+  },
+  aceptar(a, valor, gatillo) {
+    a.est.lecturas++;
+    if (!a.est.primera) a.est.primera = Date.now() - a.est.inicio;
+    a.cand = null; this.pintarCandidato();
+    this.leido(valor, false, gatillo);
+  },
+  pintarCandidato() {
+    const a = this.activo, c = a && a.cand, marco = document.getElementById('camaraMarco'), b = document.getElementById('camaraApunta');
+    if (marco) marco.classList.toggle('apunta', !!c);
+    if (!b) return;
+    b.classList.toggle('on', !!c);
+    b.textContent = c ? c.valor + (this.modo === 'tocar' ? ' · Toca para leer' : '')
+      : this.modo === 'tocar' ? 'Apunta la línea roja al código y toca' : 'Apunta la línea roja al código';
+  },
+  cambiarModo() {
+    this.modo = this.modo === 'tocar' ? 'auto' : 'tocar';
+    try { localStorage.setItem('camaraModo', this.modo); } catch (e) { /* sin almacenamiento */ }
+    this.mostrarControles();
   },
 
   mostrarControles() {
@@ -112,6 +162,9 @@ const Escaner = {
     const cap = capacidades(a.pista), ajustes = a.pista.getSettings ? a.pista.getSettings() : {};
     const luz = document.getElementById('camaraLuz'), zoom = document.getElementById('camaraZoom');
     if (luz) luz.hidden = !cap.torch;
+    const modo = document.getElementById('camaraModo');
+    if (modo) modo.textContent = this.modo === 'tocar' ? 'Modo: tocar' : 'Modo: automático';
+    this.pintarCandidato();
     const lente = document.getElementById('camaraLente'), n = this.camaras.length;
     if (lente && n > 1) { lente.hidden = false; lente.textContent = 'Cámara ' + (indiceCamara(this.camaras, ajustes.deviceId) + 1) + '/' + n; }
     if (zoom && cap.zoom && cap.zoom.max >= 2) { zoom.hidden = false; zoom.textContent = 'Zoom ×' + redondo(this.zoom); }
@@ -186,10 +239,11 @@ const Escaner = {
     if (v) { this.leido(v, true); el.value = ''; el.focus(); }
   },
 
-  leido(txt, manual) {
+  // manual: escrito o con lector USB. gatillo: la persona ha tocado para leerlo (vale aunque se repita).
+  leido(txt, manual, gatillo) {
     const codigo = String(txt).trim().toUpperCase();
     const ahora = Date.now();
-    if (!manual && codigo === this.ultimo && ahora - this.ultimoT < 2500) return; // misma etiqueta aún delante de la cámara
+    if (!manual && !gatillo && codigo === this.ultimo && ahora - this.ultimoT < 2500) return; // misma etiqueta aún delante de la cámara
     this.ultimo = codigo; this.ultimoT = ahora;
     pitido();
     const marco = document.getElementById('camaraMarco');
@@ -197,6 +251,28 @@ const Escaner = {
     if (this.alLeer) this.alLeer(codigo);
   }
 };
+
+// Qué código del fotograma se toma: de los que valen en esta pantalla, el que cruza el centro (la línea
+// roja) o, si no lo cruza ninguno, el único que haya. Con varios y ninguno apuntado, no se toma nada.
+const EAN = /^\d{8}$|^\d{12,14}$/;
+function codigoValido(v, tipo) {
+  if (tipo === 'persona') return /^[^@\s]+@[^@\s]+\.[a-z]+$/i.test(v);
+  return /^ART\d{3,}$/i.test(v) || EAN.test(v) || (typeof state !== 'undefined' && state.articulos.some(a => a.id.toUpperCase() === v.toUpperCase()));
+}
+function elegirCandidato(codigos, w, h, tipo) {
+  const validos = codigos.map(c => ({ valor: String(c.rawValue || '').trim(), caja: c.boundingBox }))
+    .filter(c => c.valor && codigoValido(c.valor, tipo));
+  if (!validos.length) return null;
+  const cx = w / 2, cy = h / 2, margen = Math.min(w, h) * 0.06;
+  const cruza = c => c.caja && cx >= c.caja.x - margen && cx <= c.caja.x + c.caja.width + margen && cy >= c.caja.y - margen && cy <= c.caja.y + c.caja.height + margen;
+  const centrados = validos.filter(cruza);
+  if (centrados.length) {
+    const dist = c => Math.hypot(c.caja.x + c.caja.width / 2 - cx, c.caja.y + c.caja.height / 2 - cy);
+    return { valor: centrados.sort((x, y) => dist(x) - dist(y))[0].valor, centrado: true };
+  }
+  const distintos = [...new Set(validos.map(c => c.valor))];
+  return distintos.length === 1 ? { valor: distintos[0], centrado: !validos[0].caja } : null;
+}
 
 const espera = ms => new Promise(ok => setTimeout(ok, ms));
 const conLimite = (promesa, ms, mensaje) => Promise.race([promesa, espera(ms).then(() => { throw new Error(mensaje); })]);
@@ -387,8 +463,10 @@ document.addEventListener('keydown', e => {
   const ahora = performance.now();
   if (ahora - lector.t > 50) lector.texto = '';
   lector.t = ahora;
-  if (e.key === 'Enter' || e.key === 'Tab') {
-    if (lector.texto.length >= 3) { e.preventDefault(); Escaner.leido(lector.texto, true); }
+  if (e.key === 'Enter' || e.key === 'Tab' || e.key === ' ') {
+    if (lector.texto.length >= 3 && e.key !== ' ') { e.preventDefault(); Escaner.leido(lector.texto, true); }
+    // Espacio o Intro sueltos con la cámara encendida: gatillo (lee el código apuntado)
+    else if (!lector.texto && Escaner.activo && e.key !== 'Tab') { e.preventDefault(); Escaner.disparar(); }
     lector.texto = '';
   } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) lector.texto += e.key;
 });
