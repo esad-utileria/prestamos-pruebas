@@ -8,18 +8,22 @@
 // resolución completa la parte del vídeo que se ve. Cada sesión deja un diagnóstico en el Log.
 //
 // Qué se da por leído (como una pistola lectora): solo el código que está bajo la línea roja del centro
-// (o el único que se ve) y solo si tiene sentido en esa pantalla (etiqueta ARTnnn, artículo conocido o
-// EAN; en el paso 1 de Prestar, el QR de una persona). Modo «tocar» (por defecto): el marco se pone
-// verde y enseña el código apuntado, y se lee al tocar el vídeo (o con Espacio/Intro en el ordenador).
-// Modo «automático»: se lee solo cuando el mismo código sigue bajo la línea 3 fotogramas seguidos.
+// (o el único que se ve). Se leen todos los formatos habituales, como en AppSheet (cajas con ITF-14,
+// UPC, Code 39…), pero si hay varios se prefiere el que tiene sentido en esa pantalla (etiqueta ARTnnn,
+// artículo conocido o EAN; en el paso 1 de Prestar solo vale el QR de una persona). Modo «tocar» (por
+// defecto): el marco se pone verde y enseña el código apuntado, y se lee al tocar el vídeo (o con
+// Espacio/Intro en el ordenador). Modo «automático»: se lee cuando el mismo código sigue bajo la línea
+// 3 fotogramas seguidos (5 si no es una etiqueta ni un artículo conocido, por si es una lectura falsa).
 
 const MOTOR_ZXING = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.1/dist/iife/ponyfill.js';
-// Sin Code 39: las etiquetas son Code 128 y el 39 daba lecturas falsas con textos y códigos cercanos
-const FORMATOS = ['code_128', 'qr_code', 'ean_13', 'ean_8'];
+// Todos los formatos de producto y logística. Las lecturas falsas de textos cercanos (sobre todo Code 39)
+// ya no molestan: solo se lee al tocar o, en automático, si el código se mantiene bajo la línea.
+const FORMATOS = ['code_128', 'qr_code', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'itf', 'code_39', 'code_93', 'codabar', 'data_matrix'];
 const CANDIDATO_MS = 700; // un código apuntado sigue valiendo para «tocar» hasta 0,7 s después de verlo…
 // …o hasta 4 fotogramas en equipos lentos, donde cada fotograma tarda más (si no, nunca llegaría a ESTABLE)
 const vigencia = a => Math.max(CANDIDATO_MS, (a.msZxing || 0) * 4);
-const ESTABLE = 3;        // modo automático: fotogramas seguidos con el mismo código bajo la línea
+const ESTABLE = 3;        // modo automático: fotogramas seguidos con el mismo código bajo la línea…
+const ESTABLE_OTRO = 5;   // …o con un código que no es etiqueta, EAN ni artículo conocido
 
 const Escaner = {
   activo: null,   // { flujo, video, pista, detectores, temporizador, vuelta, fallos, est }
@@ -75,7 +79,7 @@ const Escaner = {
       const detectores = await conLimite(motor, 20000, 'no se ha podido cargar el lector de códigos. Revisa la conexión');
       if (!document.body.contains(video)) { detener(flujo); return; }
       this.activo = { flujo, video, pista, detectores, temporizador: 0, vuelta: 0, fallos: 0,
-        est: { inicio: Date.now(), fotogramas: 0, ms: 0, lecturas: 0, primera: 0, nativo: 0, zxing: 0 } };
+        est: { inicio: Date.now(), fotogramas: 0, ms: 0, lecturas: 0, primera: 0, nativo: 0, zxing: 0, vistos: {} } };
       if (!detectores.zxing) cargarZxing(detectores); // refuerzo listo por si el nativo no lee
       await this.ponerZoom(zoomPreferido(pista));
       // Tocar el vídeo: lee el código apuntado (modo tocar) o, si no hay ninguno, enfoca en ese punto
@@ -101,14 +105,14 @@ const Escaner = {
     if (!document.hidden && a.video.readyState >= 2 && a.video.videoWidth) {
       try {
         const d = a.detectores, n = ++a.vuelta;
-        // Con lector nativo, ZXing entra un fotograma de cada dos en cuanto el nativo falla unas cuantas veces
-        const usarZxing = !d.nativo || (a.fallos > 4 && n % 2 === 0 && !!d.zxing);
+        // Con lector nativo, ZXing solo entra un fotograma de cada cuatro cuando el nativo lleva un rato sin leer
+        const usarZxing = !d.nativo || (a.fallos > 10 && n % 4 === 0 && !!d.zxing);
         const detector = usarZxing ? d.zxing : d.nativo;
         if (detector) {
           // ZXing solo lee códigos de barras casi horizontales: prueba también con el fotograma girado
           // En equipos lentos (p. ej. Surface Go) se analiza menos imagen y se prueban menos giros
           const giros = a.ligero ? GIROS_LIGERO : GIROS;
-          const giro = usarZxing ? giros[Math.floor(n / (d.nativo ? 2 : 1)) % giros.length] : 0;
+          const giro = usarZxing ? giros[Math.floor(n / (d.nativo ? 4 : 1)) % giros.length] : 0;
           const t0 = performance.now();
           const lienzo = recorteVisible(a.video, giro, a.ligero ? ANCHO_LIGERO : MAX_ANCHO);
           const codigos = await detector.detect(lienzo);
@@ -116,8 +120,9 @@ const Escaner = {
           a.est.fotogramas++; a.est.ms += ms;
           if (usarZxing) {
             a.msZxing = a.msZxing ? a.msZxing * 0.8 + ms * 0.2 : ms;
-            if (!a.ligero && a.est.fotogramas >= 6 && a.msZxing > LENTO_MS) { a.ligero = true; a.est.ligero = true; this.mostrarControles(); }
+            if (!a.ligero && !d.nativo && a.est.fotogramas >= 6 && a.msZxing > LENTO_MS) { a.ligero = true; a.est.ligero = true; this.mostrarControles(); }
           }
+          anotarVistos(a.est, codigos);
           const cand = elegirCandidato(codigos, lienzo.width, lienzo.height, this.tipo);
           if (cand && this.activo === a) {
             a.fallos = 0; a.est[usarZxing ? 'zxing' : 'nativo']++;
@@ -134,9 +139,9 @@ const Escaner = {
   verCandidato(a, cand) {
     const ahora = Date.now();
     if (a.cand && a.cand.valor === cand.valor) { a.cand.veces++; a.cand.t = ahora; a.cand.centrado = cand.centrado; }
-    else a.cand = { valor: cand.valor, veces: 1, t: ahora, centrado: cand.centrado };
+    else a.cand = { valor: cand.valor, veces: 1, t: ahora, centrado: cand.centrado, conocido: cand.conocido };
     this.pintarCandidato();
-    if (this.modo === 'auto' && cand.centrado && a.cand.veces >= ESTABLE) { this.aceptar(a, a.cand.valor, false); return true; }
+    if (this.modo === 'auto' && cand.centrado && a.cand.veces >= (cand.conocido ? ESTABLE : ESTABLE_OTRO)) { this.aceptar(a, a.cand.valor, false); return true; }
     return false;
   },
   candidatoVigente() { const a = this.activo; return a && a.cand && Date.now() - a.cand.t < vigencia(a) ? a.cand : null; },
@@ -261,26 +266,38 @@ const Escaner = {
   }
 };
 
-// Qué código del fotograma se toma: de los que valen en esta pantalla, el que cruza el centro (la línea
-// roja) o, si no lo cruza ninguno, el único que haya. Con varios y ninguno apuntado, no se toma nada.
+// Qué código del fotograma se toma: el que cruza el centro (la línea roja) o, si no lo cruza ninguno, el
+// único que haya. Si hay varios, mandan los «conocidos» (etiqueta ARTnnn, EAN o artículo del catálogo).
+// En la pantalla de personas solo vale el QR con un correo. Los de menos de 4 caracteres se ignoran:
+// suelen ser lecturas falsas de textos.
 const EAN = /^\d{8}$|^\d{12,14}$/;
-function codigoValido(v, tipo) {
-  if (tipo === 'persona') return /^[^@\s]+@[^@\s]+\.[a-z]+$/i.test(v);
+function codigoConocido(v) {
   return /^ART\d{3,}$/i.test(v) || EAN.test(v) || (typeof state !== 'undefined' && state.articulos.some(a => a.id.toUpperCase() === v.toUpperCase()));
 }
 function elegirCandidato(codigos, w, h, tipo) {
-  const validos = codigos.map(c => ({ valor: String(c.rawValue || '').trim(), caja: c.boundingBox }))
-    .filter(c => c.valor && codigoValido(c.valor, tipo));
-  if (!validos.length) return null;
+  // El ITF de las cajas es de 14 cifras: uno más corto suele ser un trozo mal leído del mismo código
+  let todos = codigos.map(c => ({ valor: String(c.rawValue || '').trim(), caja: c.boundingBox, itf: c.format === 'itf' }))
+    .filter(c => c.valor.length >= 4 && (!c.itf || c.valor.length >= 14))
+    .map(c => ({ ...c, conocido: tipo === 'persona' ? /^[^@\s]+@[^@\s]+\.[a-z]+$/i.test(c.valor) : codigoConocido(c.valor) }));
+  if (tipo === 'persona') todos = todos.filter(c => c.conocido);
+  if (!todos.length) return null;
+  const conocidos = todos.filter(c => c.conocido), validos = conocidos.length ? conocidos : todos;
   const cx = w / 2, cy = h / 2, margen = Math.min(w, h) * 0.06;
   const cruza = c => c.caja && cx >= c.caja.x - margen && cx <= c.caja.x + c.caja.width + margen && cy >= c.caja.y - margen && cy <= c.caja.y + c.caja.height + margen;
-  const centrados = validos.filter(cruza);
-  if (centrados.length) {
-    const dist = c => Math.hypot(c.caja.x + c.caja.width / 2 - cx, c.caja.y + c.caja.height / 2 - cy);
-    return { valor: centrados.sort((x, y) => dist(x) - dist(y))[0].valor, centrado: true };
-  }
+  const dist = c => Math.hypot(c.caja.x + c.caja.width / 2 - cx, c.caja.y + c.caja.height / 2 - cy);
+  // Primero los que cruzan la línea (conocidos antes que el resto) y, de esos, el más cercano al centro
+  const centrados = todos.filter(cruza).sort((x, y) => (y.conocido - x.conocido) || dist(x) - dist(y));
+  if (centrados.length) return { valor: centrados[0].valor, centrado: true, conocido: centrados[0].conocido };
   const distintos = [...new Set(validos.map(c => c.valor))];
-  return distintos.length === 1 ? { valor: distintos[0], centrado: !validos[0].caja } : null;
+  return distintos.length === 1 ? { valor: distintos[0], centrado: !validos[0].caja, conocido: validos[0].conocido } : null;
+}
+
+// Para el diagnóstico: qué códigos (formato y valor) ha visto la cámara en la sesión, aunque no se leyeran
+function anotarVistos(est, codigos) {
+  for (const c of codigos) {
+    const k = (c.format || '?') + ':' + String(c.rawValue || '').trim().slice(0, 30);
+    if (est.vistos[k] || Object.keys(est.vistos).length < 15) est.vistos[k] = (est.vistos[k] || 0) + 1;
+  }
 }
 
 const espera = ms => new Promise(ok => setTimeout(ok, ms));
@@ -425,7 +442,7 @@ function enviarDiagnostico(a, zoom) {
       camara: (Escaner.camaras.find(c => c.deviceId === aj.deviceId) || {}).label || '', camaras: Escaner.camaras.map(c => c.label).join(' | '),
       zoom: redondo(zoom || 1), zoomMax: cap.zoom ? cap.zoom.max : null, enfoque: (cap.focusMode || []).join('/'), linterna: !!cap.torch,
       fotogramas: e.fotogramas, msPorFotograma: e.fotogramas ? Math.round(e.ms / e.fotogramas) : null,
-      lecturas: e.lecturas, porNativo: e.nativo, porZxing: e.zxing, primeraLecturaMs: e.primera || null    }).catch(() => {});
+      lecturas: e.lecturas, porNativo: e.nativo, porZxing: e.zxing, primeraLecturaMs: e.primera || null, vistos: e.vistos }).catch(() => {});
   } catch (x) { /* el diagnóstico nunca debe molestar */ }
 }
 
