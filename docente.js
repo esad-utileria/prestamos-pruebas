@@ -308,7 +308,7 @@ async function devolverUno(id) {
 function vMas() {
   const opciones = [['activos', 'Préstamos activos', 'En curso y con retraso', 'box'], ['alta', 'Alta y edición de artículos', 'Nuevos artículos. Para editar uno, escanéalo aquí o ábrelo en el catálogo', 'plus'], ['etiquetas', 'Etiquetas', 'Generar e imprimir códigos de barras', 'tag'],
     ['solicitudes', 'Solicitudes', 'Aprobar, citar o rechazar', 'list'], ['incidencias', 'Incidencias', 'Daños y mantenimiento', 'more'], ['listas', 'Listas', 'Categorías, asignaturas, especialidades y cursos', 'list'],
-    ['usuarios', 'Usuarios y roles', 'Docentes y administradores', 'user'], ['perfil', 'Perfil', state.usuario.email, 'user']];
+    ['usuarios', 'Usuarios y roles', 'Alumnado (especialidad y curso), docentes y administradores', 'user'], ['perfil', 'Perfil', state.usuario.email, 'user']];
   return `<div class="stack"><h1>Más opciones</h1><div class="list">${opciones.map(([h, t, d, i]) => `<a class="li" href="#${h}"><div class="thumb" style="display:grid;place-items:center;background:var(--primary-soft);color:var(--primary)">${ICON[i] || ''}</div><div class="grow"><div class="title">${t}</div><div class="small muted">${esc(d)}</div></div></a>`).join('')}</div></div>`;
 }
 ICON.plus = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>';
@@ -335,7 +335,7 @@ function vAlta() {
     <div class="hint">Para cambiar la foto o los datos de un artículo ya dado de alta: ábrelo en el <a href="#catalogo">Catálogo</a> y pulsa «Editar foto y datos».</div>
     ${Escaner.html('Escanea la etiqueta pegada en el artículo')}
     <div class="foto-alta azulejo" id="aFotoCaja">${op.altaFoto ? `<img src="${op.altaFoto}" alt="">` : ''}
-      <label class="btn">${ICON.cam} ${op.altaFoto ? 'Repetir foto' : 'Hacer foto'}<input type="file" accept="image/*" capture="environment" hidden onchange="tomarFoto(this)"></label></div>
+      ${botonFoto(op.altaFoto ? 'Repetir foto' : 'Hacer foto', 'alta', 'tomarFoto')}</div>
     <div class="card stack">
       <div><label class="f">Código</label><input class="input" id="aCodigo" value="${esc(op.altaCodigo)}" autocapitalize="characters" oninput="op.altaCodigo=this.value.trim().toUpperCase();pintarPistaCodigo()"><div class="hint" id="aPista"></div></div>
       <div><label class="f">Descripción</label><input class="input" id="aDesc" placeholder="Ej.: Lámpara de pie dorada"></div>
@@ -355,18 +355,92 @@ function pintarPistaCodigo() {
 // Lee la foto de la cámara o la galería, reducida a 1600 px, y la muestra en la caja indicada
 async function leerFoto(input, caja) {
   if (!input.files.length) return null;
-  try {
-    const bmp = await createImageBitmap(input.files[0]);
-    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-    const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
-    cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
-    const url = cv.toDataURL('image/jpeg', 0.85);
-    $(caja).querySelectorAll('img').forEach(i => i.remove());
-    const img = new Image(); img.src = url; $(caja).prepend(img);
-    return url;
-  } catch (e) { toast('No se pudo leer la foto'); return null; }
+  try { return mostrarFoto(reducirFoto(await createImageBitmap(input.files[0])), caja); }
+  catch (e) { toast('No se pudo leer la foto'); return null; }
+}
+function reducirFoto(img) {
+  const w = img.videoWidth || img.width, h = img.videoHeight || img.height, k = Math.min(1, 1600 / Math.max(w, h));
+  const cv = document.createElement('canvas'); cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  return cv.toDataURL('image/jpeg', 0.85);
+}
+function mostrarFoto(url, caja) {
+  $(caja).querySelectorAll('img').forEach(i => i.remove());
+  const img = new Image(); img.src = url; $(caja).prepend(img);
+  return url;
 }
 async function tomarFoto(input) { const url = await leerFoto(input, '#aFotoCaja'); if (url) op.altaFoto = url; }
+
+// ---------- Hacer la foto con la cámara ----------
+// En el móvil, el botón abre la cámara del sistema (input con capture). En el ordenador (p. ej. la Surface)
+// el navegador ignora capture y abriría el explorador de archivos: allí se hace la foto dentro de la web.
+const camaraDelSistema = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+const DESTINO_FOTO = {
+  alta: url => { op.altaFoto = mostrarFoto(url, '#aFotoCaja'); },
+  edicion: url => { ed.foto = mostrarFoto(url, '#fotoGrande'); ed.quitar = false; $('#fotoGrande').removeAttribute('data-foto'); }
+};
+function botonFoto(texto, destino, alElegir) {
+  return camaraDelSistema
+    ? `<label class="btn">${ICON.cam} ${texto}<input type="file" accept="image/*" capture="environment" hidden onchange="${alElegir}(this)"></label>`
+    : `<button class="btn" type="button" onclick="abrirCamaraFoto('${destino}')">${ICON.cam} ${texto}</button>`;
+}
+const camFoto = { flujo: null, destino: null };
+async function abrirCamaraFoto(destino, deviceId) {
+  Escaner.parar(); // una cámara no se puede abrir dos veces a la vez
+  cerrarCamaraFoto(false);
+  camFoto.destino = destino;
+  const capa = document.createElement('div'); capa.id = 'camFoto'; capa.className = 'cam-foto';
+  capa.innerHTML = `<video playsinline muted autoplay></video><div class="cam-foto-info small" id="camFotoInfo">Abriendo la cámara…</div>
+    <div class="cam-foto-botones"><button class="btn" id="camFotoDisparo" disabled onclick="dispararFoto()">${ICON.cam} Hacer foto</button>
+      <button class="btn ghost" id="camFotoOtra" hidden onclick="otraCamaraFoto()">Otra cámara</button>
+      <label class="btn ghost">Elegir archivo<input type="file" accept="image/*" hidden onchange="archivoCamaraFoto(this)"></label>
+      <button class="btn ghost" onclick="cerrarCamaraFoto()">Cancelar</button></div>`;
+  document.body.appendChild(capa);
+  try {
+    const guardada = deviceId || localStorage.getItem('camaraFotoId');
+    const pedir = id => navigator.mediaDevices.getUserMedia({ audio: false, video: { ...(id ? { deviceId: { exact: id } } : { facingMode: { ideal: 'environment' } }), width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    let flujo;
+    try { flujo = await pedir(guardada); } catch (e) { if (!guardada || e.name === 'NotAllowedError') throw e; flujo = await pedir(null); }
+    // En la Surface se abre la frontal aunque se pida la trasera: si se sabe cuál es la trasera, se cambia
+    const camaras = await camarasDisponibles(), actual = flujo.getVideoTracks()[0].getSettings().deviceId;
+    if (!guardada && camaras.some(esTrasera) && !camaras.some(c => esTrasera(c) && c.deviceId === actual)) {
+      detener(flujo); flujo = await pedir(camaras.find(esTrasera).deviceId);
+    }
+    if (!document.body.contains(capa)) { detener(flujo); return; }
+    camFoto.flujo = flujo; camFoto.camaras = camaras;
+    const video = capa.querySelector('video'); video.srcObject = flujo; await video.play();
+    const id = flujo.getVideoTracks()[0].getSettings().deviceId, i = Math.max(0, camaras.findIndex(c => c.deviceId === id));
+    $('#camFotoInfo').textContent = camaras.length > 1 ? `Cámara ${i + 1}/${camaras.length}` : '';
+    $('#camFotoOtra').hidden = camaras.length < 2;
+    $('#camFotoDisparo').disabled = false;
+  } catch (e) {
+    const info = $('#camFotoInfo'); if (info) info.textContent = 'No se puede usar la cámara: ' + mensajeCamara(e) + '. Puedes elegir un archivo.';
+  }
+}
+function otraCamaraFoto() {
+  const cs = camFoto.camaras || []; if (cs.length < 2) return;
+  const actual = camFoto.flujo && camFoto.flujo.getVideoTracks()[0].getSettings().deviceId;
+  const sig = cs[(Math.max(0, cs.findIndex(c => c.deviceId === actual)) + 1) % cs.length];
+  try { localStorage.setItem('camaraFotoId', sig.deviceId); } catch (e) { /* sin almacenamiento */ }
+  abrirCamaraFoto(camFoto.destino, sig.deviceId);
+}
+function dispararFoto() {
+  const video = $('#camFoto video'); if (!video || !video.videoWidth) return;
+  const url = reducirFoto(video), destino = camFoto.destino;
+  pitido(); cerrarCamaraFoto(); DESTINO_FOTO[destino](url);
+}
+async function archivoCamaraFoto(input) {
+  if (!input.files.length) return;
+  try { const url = reducirFoto(await createImageBitmap(input.files[0])), destino = camFoto.destino; cerrarCamaraFoto(); DESTINO_FOTO[destino](url); }
+  catch (e) { toast('No se pudo leer la foto'); }
+}
+function cerrarCamaraFoto(volverEscaner = true) {
+  if (camFoto.flujo) { detener(camFoto.flujo); camFoto.flujo = null; }
+  const capa = $('#camFoto'); if (capa) capa.remove();
+  // En Alta, el escáner de etiquetas vuelve a encenderse si la persona lo tenía activado
+  if (volverEscaner && document.getElementById('camara')) { try { if (localStorage.getItem('camara') === 'si') Escaner.encender(); } catch (e) { /* sin almacenamiento */ } }
+}
+window.addEventListener('hashchange', () => cerrarCamaraFoto(false));
 async function guardarAlta(seguir) {
   const id = $('#aCodigo').value.trim().toUpperCase();
   const cat = op.nuevaCat ? $('#aCatNueva').value.trim().toUpperCase() : $('#aCat').value;
@@ -399,7 +473,7 @@ function vEditar(id) {
     <h1>Editar artículo</h1>
     <div class="foto-alta azulejo" id="fotoGrande" ${!ed.foto && !ed.quitar && a.foto ? `data-foto="${esc(id)}"` : ''}>${ed.foto ? `<img src="${ed.foto}" alt="">` : ''}
       <div class="row" style="position:relative;z-index:1;gap:8px">
-        <label class="btn">${ICON.cam} ${conFoto ? 'Cambiar foto' : 'Hacer foto'}<input type="file" accept="image/*" capture="environment" hidden onchange="fotoEdicion(this)"></label>
+        ${botonFoto(conFoto ? 'Cambiar foto' : 'Hacer foto', 'edicion', 'fotoEdicion')}
         <label class="btn ghost" style="background:#fff">Galería<input type="file" accept="image/*" hidden onchange="fotoEdicion(this)"></label>
         ${conFoto ? '<button class="btn ghost" style="background:#fff" onclick="ed.foto=\'\';ed.quitar=true;render()">Quitar</button>' : ''}
       </div></div>
@@ -528,9 +602,10 @@ async function imprimirEtiquetas() {
 }
 
 // ---------- Solicitudes (profesorado) ----------
-const gs = { tab: 'Pendiente', lista: null, citando: null };
+const gs = { tab: 'Pendiente', lista: null, citando: null, foco: null };
 
-function vSolicitudesDocente() {
+function vSolicitudesDocente(id) {
+  if (id) gs.foco = id;
   alMontar = async () => {
     datosAlDia('solicitudes', () => api('solicitudes'), ls => { gs.lista = ls; pintarSolicitudes(); }).catch(e => errorEn('#solDoc', e));
   };
@@ -542,13 +617,47 @@ function pintarSolicitudes() {
   const cuenta = e => ls.filter(s => s.estado === e).length;
   const atencion = ls.filter(necesitaAtencion).length;
   $('#solTabs').innerHTML = [['Pendiente', 'Pendientes'], ['Citada', 'Citadas']].map(([k, t]) => `<button class="chip ${gs.tab === k ? 'on' : ''}" onclick="gs.tab='${k}';pintarSolicitudes()">${t} · ${cuenta(k)}${k === 'Citada' && atencion ? ` (${atencion} por gestionar)` : ''}</button>`).join('');
-  // Las citas con respuesta que pide algo al docente van primero
-  const lista = ls.filter(s => s.estado === gs.tab).sort((a, b) => necesitaAtencion(b) - necesitaAtencion(a));
+  // Por orden de llegada; las citas con respuesta que pide algo al docente van primero
+  const lista = ls.filter(s => s.estado === gs.tab).sort((a, b) => necesitaAtencion(b) - necesitaAtencion(a) || String(a.creada).localeCompare(String(b.creada)));
   $('#solDoc').innerHTML = lista.map(tarjetaSolicitud).join('') || '<p class="muted">No hay solicitudes.</p>';
   observarFotos();
+  // Desde el enlace de un correo (#solicitudes/<id>): se abre su pestaña y se lleva a la vista
+  if (gs.foco) {
+    const s = ls.find(x => x.id === gs.foco), el = $('#sol-' + CSS.escape(gs.foco));
+    if (s && s.estado !== gs.tab) { gs.tab = s.estado; return pintarSolicitudes(); }
+    if (el) { el.scrollIntoView({ block: 'start' }); el.classList.add('flash'); }
+    gs.foco = null;
+  }
+}
+// ---------- Cola de cada artículo ----------
+// Otras solicitudes activas del mismo artículo con fechas que se solapan, por orden de llegada
+const solapanFechas = (a, b) => new Date(a.desde) <= new Date(b.hasta) && new Date(b.desde) <= new Date(a.hasta);
+const colaDe = (s, id) => (gs.lista || []).filter(o => o.articulos.includes(id) && (o.id === s.id || solapanFechas(o, s)))
+  .sort((a, b) => String(a.creada).localeCompare(String(b.creada)));
+function avisoCola(s, id, a) {
+  const cola = colaDe(s, id), otras = cola.filter(o => o.id !== s.id), avisos = [];
+  const citada = otras.find(o => o.estado === 'Citada');
+  if (citada) avisos.push(`<div style="color:var(--danger);font-weight:600">Ya citado para ${esc(citada.usuario)} ${periodo(citada)}: no se puede citar ni entregar a la vez</div>`);
+  if (otras.length) {
+    const pos = cola.findIndex(o => o.id === s.id) + 1;
+    avisos.push(`<div style="color:var(--warn);font-weight:600">${pos}º de ${cola.length} en la cola para estas fechas</div>`
+      + otras.map(o => `<div class="muted">${esc(o.usuario)} ${periodo(o)} · pedido el ${fmt(o.creada)}${o.estado === 'Citada' ? ' · citado' : ''}</div>`).join(''));
+  }
+  if (a && a.prestamo && new Date(a.prestamo.fin) >= new Date(s.desde)) avisos.push(`<div style="color:var(--warn)">Prestado a ${esc(a.prestamo.usuario || '')} hasta el ${fmt(a.prestamo.fin)}</div>`);
+  return avisos.join('');
+}
+// Asignatura que el docente deja en la solicitud: la de la lista, la escrita por el alumno (corregida)
+// para añadirla a la lista, o un texto solo para esta solicitud
+function asignaturaElegida(s) {
+  const sel = $('#asig-' + CSS.escape(s.id)).value;
+  const texto = sel.startsWith('__') ? $('#asigTxt-' + CSS.escape(s.id)).value.trim() : sel;
+  if (!texto) return null;
+  const existente = (state.maestros.Asignatura || []).find(a => a.toLowerCase() === texto.toLowerCase());
+  return existente ? { asignatura: existente } : { asignatura: texto, asignaturaNueva: sel === '__nueva', soloEsta: sel !== '__nueva' };
 }
 function tarjetaSolicitud(s) {
   const asig = state.maestros.Asignatura || [];
+  const fueraDeLista = !s.motivoNuevo && s.motivo && !asig.includes(s.motivo);
   const citando = gs.citando === s.id;
   const manana = new Date(Date.now() + 864e5);
   // Al cambiar la cita, se propone por defecto la fecha que pidió el alumno
@@ -559,11 +668,12 @@ function tarjetaSolicitud(s) {
     <div class="row wrap">${s.estado === 'Citada' ? RESP_CITA[s.respuestaCita || ''] : ESTADO_SOL[s.estado]}</div>
     <div class="small muted">Lo necesita del ${fmt(s.desde)} al ${fmt(s.hasta)}${s.comentario ? ` · «${esc(s.comentario)}»` : ''}</div>
     ${s.estado === 'Citada' ? bloqueCitaDocente(s) : ''}
-    <div class="list small">${s.articulos.map(i => { const a = artPorId(i); return `<div class="li">${miniatura(a)}<div class="grow"><div class="title">${esc(a ? a.desc : i)}</div><div class="muted">${esc(i)}</div></div>${a ? badge(a) : ''}</div>`; }).join('')}</div>
+    <div class="list small">${s.articulos.map(i => { const a = artPorId(i); return `<div class="li">${miniatura(a)}<div class="grow"><div class="title">${esc(a ? a.desc : i)}</div><div class="muted">${esc(i)}</div>${avisoCola(s, i, a)}</div>${a ? badge(a) : ''}</div>`; }).join('')}</div>
     <div><label class="f">Asignatura o motivo ${s.motivoNuevo ? '<span class="badge b-violet">Nueva, escrita por el alumno</span>' : ''}</label>
-      <select class="input" id="asig-${esc(s.id)}" onchange="$('#asigTxtCaja-${esc(s.id)}').style.display=this.value.startsWith('__')?'block':'none'">
+      <select class="input" id="asig-${esc(s.id)}" onchange="const c=$('#asigTxtCaja-${esc(s.id)}');if(c)c.style.display=this.value.startsWith('__')?'block':'none'">
         ${s.motivoNuevo ? `<option value="__nueva" selected>Añadir a la lista (puedes corregir el texto)</option><option value="__solo">Usar solo en este préstamo</option>` : ''}
-        ${asig.map(a => `<option value="${esc(a)}" ${!s.motivoNuevo && a === s.motivo ? 'selected' : ''}>${s.motivoNuevo ? 'Cambiar por: ' : ''}${esc(a)}</option>`).join('')}
+        ${fueraDeLista ? `<option value="${esc(s.motivo)}" selected>${esc(s.motivo)} (solo en esta solicitud)</option>` : ''}
+        ${asig.map(a => `<option value="${esc(a)}" ${!s.motivoNuevo && a === s.motivo ? 'selected' : ''}>${s.motivoNuevo || fueraDeLista ? 'Cambiar por: ' : ''}${esc(a)}</option>`).join('')}
       </select>
       ${s.motivoNuevo ? `<div id="asigTxtCaja-${esc(s.id)}" style="margin-top:8px"><input class="input" id="asigTxt-${esc(s.id)}" value="${esc(s.motivo)}">
         <div class="hint">Texto escrito por el alumno. Corrige erratas antes de aprobar.</div></div>` : ''}</div>
@@ -610,8 +720,14 @@ function bloqueCitaDocente(s) {
 }
 function aceptarPropuesta(id) { accionSolicitud(id, 'aceptarPropuesta', {}, 'Cita confirmada y alumno avisado'); }
 function citar(id) {
+  const s = gs.lista.find(x => x.id === id);
   const cita = new Date($('#citaDia').value + 'T' + $('#citaHora').value);
-  accionSolicitud(id, 'citarSolicitud', { cita: cita.toISOString(), mensaje: $('#citaMsg').value }, 'Cita enviada por correo');
+  if (isNaN(cita)) return toast('Indica el día y la hora de la cita');
+  // La asignatura corregida (o añadida a la lista) se guarda ya al citar, no solo al aprobar
+  const asignatura = asignaturaElegida(s);
+  if (!asignatura) return toast('Escribe la asignatura o el motivo');
+  if (asignatura.asignaturaNueva) (state.maestros.Asignatura = state.maestros.Asignatura || []).push(asignatura.asignatura);
+  accionSolicitud(id, 'citarSolicitud', { cita: cita.toISOString(), mensaje: $('#citaMsg').value, ...asignatura }, 'Cita enviada por correo');
 }
 function rechazar(id) {
   const motivo = prompt('Motivo del rechazo (se enviará al alumno):');
@@ -620,13 +736,10 @@ function rechazar(id) {
 }
 function aprobar(id) {
   const s = gs.lista.find(x => x.id === id);
-  const sel = $('#asig-' + CSS.escape(id)).value;
+  const datos = asignaturaElegida(s);
+  if (!datos) return toast('Escribe la asignatura o el motivo');
   if (!confirm(`¿Entregar ahora ${s.articulos.length} artículo(s) a ${s.usuario}?`)) return;
-  const texto = sel.startsWith('__') ? $('#asigTxt-' + CSS.escape(id)).value.trim() : sel;
-  if (!texto) return toast('Escribe la asignatura o el motivo');
-  const existente = (state.maestros.Asignatura || []).find(a => a.toLowerCase() === texto.toLowerCase());
-  const datos = existente ? { asignatura: existente } : { asignatura: texto, asignaturaNueva: sel === '__nueva' };
-  if (datos.asignaturaNueva) (state.maestros.Asignatura = state.maestros.Asignatura || []).push(texto);
+  if (datos.asignaturaNueva) (state.maestros.Asignatura = state.maestros.Asignatura || []).push(datos.asignatura);
   accionSolicitud(id, 'aprobarSolicitud', datos, 'Préstamo registrado y alumno avisado');
 }
 
@@ -659,19 +772,50 @@ async function editarLista(lista, valor, accion) {
 }
 
 // ---------- Usuarios y roles ----------
+// El alumnado se da de alta solo al entrar por primera vez (o al prestarle algo). Aquí el profesorado
+// puede adelantarlo (alta con el correo) y corregir nombre, especialidad y curso; los roles, solo un administrador.
+const us = { q: '', editando: null };
 function vUsuarios() {
   const admin = state.usuario.rol === 'Administrador';
-  alMontar = () => datosAlDia('usuarios', () => api('usuarios'), us => {
-      op.usuarios = us;
-      const orden = { Administrador: 0, Docente: 1, Alumno: 2 };
-      $('#listaUsuarios').innerHTML = op.usuarios.slice().sort((a, b) => orden[a.rol] - orden[b.rol] || a.email.localeCompare(b.email)).map(u => `<div class="li">
-        <div class="avatar soft">${initials(u.nombre || u.email)}</div><div class="grow"><div class="title">${esc(u.nombre || u.email)}</div><div class="small muted">${esc(u.email)}</div></div>
-        ${admin ? `<select class="input" style="width:auto;min-height:38px" onchange="cambiarRol('${esc(u.email)}', this.value)">${['Alumno', 'Docente', 'Administrador'].map(r => `<option ${u.rol === r ? 'selected' : ''}>${r}</option>`).join('')}</select>` : `<span class="badge b-info">${esc(u.rol)}</span>`}</div>`).join('');
-    }).catch(e => errorEn('#listaUsuarios', e));
+  alMontar = () => datosAlDia('usuarios', () => api('usuarios'), lista => { op.usuarios = lista; pintarUsuarios(); }).catch(e => errorEn('#listaUsuarios', e));
   return `<div class="stack"><h1>Usuarios y roles</h1>
-    <p class="small muted">Cualquier cuenta @${esc(C.dominio)} entra como alumno. Aquí se indica quién es docente o administrador. ${admin ? 'Los cambios se aplican en unos minutos.' : 'Solo un administrador puede cambiar roles.'}</p>
-    ${admin ? `<form class="row" onsubmit="event.preventDefault();cambiarRol(this.e.value.trim().toLowerCase(), 'Docente')"><input class="input" name="e" placeholder="correo@${esc(C.dominio)}"><button class="btn" type="submit">Añadir docente</button></form>` : ''}
+    <p class="small muted">Cualquier cuenta @${esc(C.dominio)} entra como alumno la primera vez, con su nombre de Google. ${admin ? 'Aquí indicas quién es docente o administrador; los cambios se aplican en unos minutos.' : 'Solo un administrador puede cambiar roles.'}</p>
+    <form class="row" onsubmit="event.preventDefault();us.editando=this.e.value.trim().toLowerCase();us.q='';pintarUsuarios()"><input class="input" name="e" placeholder="correo@${esc(C.dominio)}" autocomplete="off"><button class="btn" type="submit">Dar de alta</button></form>
+    ${admin ? `<form class="row" onsubmit="event.preventDefault();cambiarRol(this.e.value.trim().toLowerCase(), 'Docente')"><input class="input" name="e" placeholder="correo@${esc(C.dominio)} del docente" autocomplete="off"><button class="btn ghost" type="submit">Añadir docente</button></form>` : ''}
+    <div class="search">${ICON.search}<input id="buscaUsuario" placeholder="Buscar por nombre, correo, especialidad o curso" value="${esc(us.q)}" oninput="us.q=this.value;pintarUsuarios()" autocomplete="off"></div>
     <div class="list" id="listaUsuarios">${cargando}</div></div>`;
+}
+function pintarUsuarios() {
+  const el = $('#listaUsuarios'); if (!el || !op.usuarios) return;
+  const admin = state.usuario.rol === 'Administrador', m = state.maestros;
+  const orden = { Administrador: 0, Docente: 1, Alumno: 2 }, q = us.q.trim().toLowerCase();
+  const perfil = u => [u.especialidad, u.curso].filter(Boolean).join(' · ');
+  let lista = op.usuarios.filter(u => !q || [u.nombre, u.email, u.especialidad, u.curso].join(' ').toLowerCase().includes(q))
+    .sort((a, b) => orden[a.rol] - orden[b.rol] || (a.nombre || a.email).localeCompare(b.nombre || b.email));
+  // Alta de alguien que aún no está: se abre su ficha vacía
+  if (us.editando && !op.usuarios.some(u => u.email === us.editando)) lista = [{ email: us.editando, nombre: '', nombrePila: '', apellidos: '', rol: 'Alumno', nuevo: true }, ...lista];
+  el.innerHTML = lista.map(u => us.editando === u.email ? `<div class="li" style="flex-wrap:wrap">
+      <div class="grow"><div class="title">${u.nuevo ? 'Alta: ' : ''}${esc(u.email)}</div></div>
+      <div class="two" style="width:100%"><div><label class="f">Nombre</label><input class="input" id="uNom" value="${esc(u.nombrePila)}"></div><div><label class="f">Apellidos</label><input class="input" id="uApe" value="${esc(u.apellidos)}"></div></div>
+      <div class="two" style="width:100%"><div><label class="f">Especialidad</label><select class="input" id="uEsp"><option value="">—</option>${(m.Especialidad || []).map(e => `<option ${u.especialidad === e ? 'selected' : ''}>${esc(e)}</option>`).join('')}</select></div>
+        <div><label class="f">Curso</label><select class="input" id="uCur"><option value="">—</option>${(m.Curso || []).map(c => `<option ${u.curso === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div></div>
+      <div class="two" style="width:100%"><button class="btn" id="btnUsuario" onclick="guardarUsuario('${esc(u.email)}')">${u.nuevo ? 'Dar de alta' : 'Guardar'}</button><button class="btn ghost" onclick="us.editando=null;pintarUsuarios()">Cancelar</button></div></div>`
+    : `<div class="li">
+      <div class="avatar soft">${initials(u.nombre || u.email)}</div><div class="grow" style="min-width:0"><div class="title">${esc(u.nombre || u.email)}</div><div class="small muted" style="overflow:hidden;text-overflow:ellipsis">${esc(u.email)}${perfil(u) ? ' · ' + esc(perfil(u)) : ''}</div></div>
+      <button class="chip" onclick="us.editando='${esc(u.email)}';pintarUsuarios()">Editar</button>
+      ${admin ? `<select class="input" style="width:auto;min-height:38px" onchange="cambiarRol('${esc(u.email)}', this.value)">${['Alumno', 'Docente', 'Administrador'].map(r => `<option ${u.rol === r ? 'selected' : ''}>${r}</option>`).join('')}</select>` : `<span class="badge b-info">${esc(u.rol)}</span>`}</div>`).join('')
+    || '<div class="li muted small">Nadie coincide con la búsqueda</div>';
+}
+async function guardarUsuario(email) {
+  const btn = $('#btnUsuario'); btn.disabled = true;
+  const datos = { email, nombre: $('#uNom').value, apellidos: $('#uApe').value, especialidad: $('#uEsp').value, curso: $('#uCur').value };
+  try {
+    const r = await api('editarUsuario', datos);
+    toast(r.nuevo ? `${email} dado de alta como alumno` : 'Datos guardados');
+    us.editando = null;
+    op.usuarios = await api('usuarios'); guardarDatos('usuarios', op.usuarios);
+    pintarUsuarios();
+  } catch (e) { btn.disabled = false; toast(e.message); }
 }
 async function cambiarRol(email, rol) {
   try { await api('cambiarRol', { email, rol }); toast(`${email}: ${rol}`); render(); } catch (e) { toast(e.message); render(); }
@@ -704,6 +848,6 @@ Object.assign(VISTAS, {
   inicio: () => vInicio(), prestar: () => vPrestar(), devolver: () => vDevolver(), activos: () => vActivos(),
   prestamo: id => vPrestamo(id), mas: () => vMas(), alta: () => vAlta(), editar: id => vEditar(id), etiquetas: () => vEtiquetas(),
   listas: () => vListas(), usuarios: () => vUsuarios(), incidencias: () => vIncidencias(),
-  solicitudes: () => esDocente() ? vSolicitudesDocente() : vSolicitudesAlumno()
+  solicitudes: id => esDocente() ? vSolicitudesDocente(id) : vSolicitudesAlumno()
 });
 ['inicio', 'prestar', 'devolver', 'activos', 'prestamo', 'mas', 'alta', 'editar', 'etiquetas', 'listas', 'usuarios', 'incidencias'].forEach(r => SOLO_DOCENTE.add(r));

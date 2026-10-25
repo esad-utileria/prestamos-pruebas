@@ -438,11 +438,7 @@ function vLogin(aviso) {
 
 function vCatalogo() {
   const doc = esDocente();
-  const q = state.q.toLowerCase();
   const f = state.filtro;
-  const lista = state.articulos.filter(a => (!state.cat || a.cat === state.cat)
-    && (f === 'todos' || a.estado === f)
-    && (!q || (a.desc + ' ' + a.id).toLowerCase().includes(q)));
   const cuenta = k => state.articulos.filter(a => k === 'todos' || a.estado === k).length;
   const filtros = doc ? [['todos', 'Todos'], ['disp', 'Disponibles'], ['prest', 'Prestados'], ['mant', 'Mantenimiento']] : [['todos', 'Todos'], ['disp', 'Disponibles']];
   const cats = state.maestros.Categoria || [];
@@ -454,17 +450,44 @@ function vCatalogo() {
       <button class="chip ${!state.cat ? 'on' : ''}" onclick="state.cat=null;render()">Todas las categorías</button>
       ${cats.map((c, i) => `<button class="chip ${state.cat === c ? 'on' : ''}" onclick="state.cat=state.maestros.Categoria[${i}];render()">${esc(catLabel(c))}</button>`).join('')}
     </div>
-    <div class="small muted">${nArt(lista.length)}</div>
-    <div class="grid">${lista.map(a => `<a class="item" href="#articulo/${encodeURIComponent(a.id)}">${ph(a)}<div class="info"><div class="name">${esc(a.desc)}</div>
-      ${doc && a.prestamo ? `<div class="small muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a.prestamo.usuario)}</div><div class="small" style="color:var(--warn);font-weight:600">Hasta el ${fmt(a.prestamo.fin)}</div>` : ''}
-      <div class="row" style="justify-content:space-between"><span class="id">${esc(a.id)}</span>${badge(a)}</div></div></a>`).join('')}</div>
+    <div id="catLista">${listaCatalogo()}</div>
     ${barraCesta()}
   </div>`;
 }
+function listaCatalogo() {
+  const doc = esDocente(), q = state.q.toLowerCase(), f = state.filtro;
+  const lista = state.articulos.filter(a => (!state.cat || a.cat === state.cat)
+    && (f === 'todos' || a.estado === f)
+    && (!q || (a.desc + ' ' + a.id).toLowerCase().includes(q)));
+  return `<div class="small muted" style="margin-bottom:10px">${nArt(lista.length)}</div>
+    <div class="grid">${lista.map(a => `<a class="item" href="#articulo/${encodeURIComponent(a.id)}">${ph(a)}<div class="info"><div class="name">${esc(a.desc)}</div>
+      ${doc && a.prestamo ? `<div class="small muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a.prestamo.usuario)}</div><div class="small" style="color:var(--warn);font-weight:600">Hasta el ${fmt(a.prestamo.fin)}</div>` : ''}
+      ${resumenReservas(a)}
+      <div class="row" style="justify-content:space-between"><span class="id">${esc(a.id)}</span>${badge(a)}</div></div></a>`).join('')}</div>`;
+}
+// Al escribir en el buscador solo se repinta la lista: si se repintara la casilla, el móvil cerraría el teclado
 function renderBusqueda() {
-  const el = $('#q'), pos = el.selectionStart;
-  render();
-  const n = $('#q'); n.focus(); n.setSelectionRange(pos, pos);
+  const el = $('#catLista'); if (!el) return;
+  el.innerHTML = listaCatalogo();
+  observarFotos();
+}
+
+// ---------- Solicitudes de cada artículo (la cola) ----------
+// a.reservas: solicitudes pendientes o citadas, por orden de llegada: { desde, hasta, estado, mia, usuario? }
+const reservasDe = a => (a && a.reservas) || [];
+const periodo = r => `del ${fmt(r.desde)} al ${fmt(r.hasta)}`;
+const quienReserva = r => r.mia ? 'Tú' : r.usuario ? r.usuario : 'Otra persona';
+function resumenReservas(a) {
+  const rs = reservasDe(a); if (!rs.length) return '';
+  const mia = rs.find(r => r.mia), r = mia || rs[0];
+  const texto = mia ? 'En tu solicitud' : esDocente() ? `Solicitado (${rs.length})` : 'Ya solicitado';
+  return `<div class="small" style="color:var(--violet);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${texto} · ${fmt(r.desde)}–${fmt(r.hasta)}</div>`;
+}
+function bloqueReservas(a) {
+  const rs = reservasDe(a); if (!rs.length) return '';
+  return `<div class="callout violet small stack"><b>Solicitado ${rs.length === 1 ? 'para estas fechas' : `${rs.length} veces (por orden de llegada)`}</b>
+    ${rs.map((r, i) => `<div>${rs.length > 1 ? `${i + 1}º · ` : ''}${esc(quienReserva(r))} ${periodo(r)}${r.estado === 'Citada' ? ' · <b>citado</b>' : ''}</div>`).join('')}
+    ${esDocente() ? '' : '<div class="muted">Puedes pedirlo para otras fechas. Si se solapan, quedarás en cola y decidirá el docente.</div>'}</div>`;
 }
 const badge = a => a.prestamo && a.prestamo.mio ? '<span class="badge b-info">En tu préstamo</span>'
   : { disp: '<span class="badge b-ok">Disponible</span>', prest: '<span class="badge b-warn">Prestado</span>', mant: '<span class="badge b-danger">Mantenimiento</span>', baja: '<span class="badge b-danger">Baja</span>' }[a.estado];
@@ -487,6 +510,7 @@ function vArticulo(id) {
         ${doc && a.ubicacion ? `<div class="small"><span class="muted">Ubicación:</span> ${esc(a.ubicacion)}</div>` : ''}
         ${doc && a.observaciones ? `<div class="small"><span class="muted">Observaciones:</span> ${esc(a.observaciones)}</div>` : ''}
         ${info}
+        ${bloqueReservas(a)}
         ${doc ? `<a class="btn ghost block" href="#editar/${encodeURIComponent(a.id)}">✎ Editar foto y datos</a>` : ''}
         ${doc ? `<div class="two">
             <button class="btn" ${a.estado !== 'disp' ? 'disabled' : ''} onclick="prestarArticulo('${esc(a.id)}')">Prestar</button>

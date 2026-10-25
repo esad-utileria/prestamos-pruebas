@@ -23,9 +23,43 @@ const artPorId = id => state.articulos.find(a => a.id === id);
 // ---------- Cesta de la solicitud ----------
 function toggleCesta(id) {
   sol.cesta = sol.cesta.includes(id) ? sol.cesta.filter(x => x !== id) : [...sol.cesta, id];
-  toast(sol.cesta.includes(id) ? 'Añadido a tu solicitud' : 'Quitado de tu solicitud');
+  toast(sol.cesta.includes(id) ? avisoAlAnadir(artPorId(id)) : 'Quitado de tu solicitud');
   render();
 }
+// Al añadir un artículo ya solicitado: aviso de lo que pasará (las fechas se eligen después)
+function avisoAlAnadir(a) {
+  const rs = reservasDe(a).filter(r => r.id !== sol.editando);
+  const mia = rs.find(r => r.mia), otra = rs.find(r => !r.mia);
+  if (mia) return `Ojo: ya lo pediste en otra solicitud (${periodo(mia)}). Solo podrás enviarlo para fechas que no se solapen.`;
+  if (otra) return `Añadido. Otra persona lo ha pedido ${periodo(otra)}: si tus fechas se solapan, irás en cola.`;
+  return 'Añadido a tu solicitud';
+}
+
+// Qué pasa con cada artículo de la cesta en las fechas elegidas: lo pedí yo en otra solicitud (no se
+// puede enviar), lo pidió otra persona (cola) o está prestado hasta después del inicio
+function conflictos(a, desde, hasta) {
+  const rs = reservasDe(a).filter(r => r.id !== sol.editando && desde && hasta && new Date(r.desde) <= hasta && desde <= new Date(r.hasta));
+  return {
+    mia: rs.find(r => r.mia),
+    antes: rs.filter(r => !r.mia),
+    prestado: a.prestamo && !a.prestamo.mio && desde && new Date(a.prestamo.fin) >= desde ? a.prestamo.fin : null
+  };
+}
+const fechasElegidas = () => {
+  const d = $('#sDesde'), h = $('#sHasta');
+  return d && h && d.value && h.value ? [new Date(d.value + 'T09:00'), new Date(h.value + 'T20:00')] : [null, null];
+};
+function avisoConflicto(a) {
+  const [desde, hasta] = fechasElegidas();
+  if (!desde) return '';
+  const c = conflictos(a, desde, hasta);
+  if (c.mia) return `<div class="small" style="color:var(--danger);font-weight:600">Ya lo pediste en otra solicitud ${periodo(c.mia)}: quítalo o cambia las fechas</div>`;
+  const avisos = [];
+  if (c.antes.length) avisos.push(`En cola: ${c.antes.length === 1 ? 'otra persona lo pidió' : c.antes.length + ' personas lo pidieron'} antes para fechas que se solapan (${c.antes.map(periodo).join('; ')})${c.antes.some(r => r.estado === 'Citada') ? ' y ya está citado' : ''}`);
+  if (c.prestado) avisos.push(`Está prestado hasta el ${fmt(c.prestado)}`);
+  return avisos.map(t => `<div class="small" style="color:var(--warn);font-weight:600">${t}</div>`).join('');
+}
+function pintarAvisosCesta() { const el = $('#cestaSol'); if (el) { el.innerHTML = listaCesta(); observarFotos(); } }
 function salirEdicion() { if (sol.editando) { sol.cesta = sol.borrador; sol.borrador = []; sol.editando = null; sol.motivoOtro = false; } }
 const enlaceSolicitud = () => sol.editando ? '#solicitud/' + encodeURIComponent(sol.editando) : '#solicitar';
 function barraCesta() {
@@ -49,7 +83,7 @@ function accionesAlumno(a) {
 
 function listaCesta() {
   const items = sol.cesta.map(artPorId).filter(Boolean);
-  return `<div class="list">${items.map((a, i) => `<div class="li ${i === items.length - 1 ? 'flash' : ''}">${miniatura(a)}<div class="grow"><div class="title">${esc(a.desc)}</div><div class="small muted">${esc(a.id)}${a.estado === 'prest' ? ' · ahora prestado' : ''}</div></div>
+  return `<div class="list">${items.map((a, i) => `<div class="li ${i === items.length - 1 ? 'flash' : ''}">${miniatura(a)}<div class="grow"><div class="title">${esc(a.desc)}</div><div class="small muted">${esc(a.id)}${a.estado === 'prest' ? ' · ahora prestado' : ''}</div>${avisoConflicto(a)}</div>
     <button class="chip" onclick="toggleCesta('${esc(a.id)}')">Quitar</button></div>`).join('') || '<div class="li muted small">Aún no hay artículos</div>'}</div>`;
 }
 
@@ -84,15 +118,17 @@ function selectorMotivo(valor, nuevo) {
 
 function vSolicitar(s) {
   const hoy = new Date(), semana = new Date(Date.now() + 7 * 864e5);
+  // La lista se pinta cuando ya están las fechas en pantalla: sus avisos dependen de ellas
+  alMontar = () => { pintarAvisosCesta(); revalidarCatalogo().then(cambio => { if (cambio) pintarAvisosCesta(); }).catch(() => {}); };
   return `<div class="stack">
     ${s ? '<a href="#solicitudes" class="small" style="color:var(--primary);text-decoration:none">← Mis solicitudes</a>' : ''}
     <div class="row"><h1>${s ? 'Editar solicitud' : 'Nueva solicitud'}</h1><span class="spacer"></span><a class="btn ghost sm" href="#escanear">Escanear</a></div>
     ${s ? `<div class="row wrap">${ESTADO_SOL[s.estado]}<span class="hint" style="margin:0">Puedes cambiarla mientras ningún docente la haya revisado.</span></div>` : ''}
-    ${listaCesta()}
+    <div id="cestaSol"></div>
     <a href="#catalogo" class="small" style="color:var(--primary)">+ Añadir desde el catálogo</a>
     <div class="card stack">
-      <div class="two"><div><label class="f">Lo necesito desde</label><input class="input" type="date" id="sDesde" value="${isoDia(s ? s.desde : hoy)}"></div>
-        <div><label class="f">Hasta</label><input class="input" type="date" id="sHasta" value="${isoDia(s ? s.hasta : semana)}"></div></div>
+      <div class="two"><div><label class="f">Lo necesito desde</label><input class="input" type="date" id="sDesde" value="${isoDia(s ? s.desde : hoy)}" onchange="pintarAvisosCesta()"></div>
+        <div><label class="f">Hasta</label><input class="input" type="date" id="sHasta" value="${isoDia(s ? s.hasta : semana)}" onchange="pintarAvisosCesta()"></div></div>
       <div><label class="f">Asignatura o motivo</label>${selectorMotivo(s ? s.motivo : '', s ? s.motivoNuevo : false)}</div>
       <div><label class="f">Comentario</label><textarea class="input" id="sComentario" rows="2">${s ? esc(s.comentario) : ''}</textarea></div>
     </div>
@@ -107,9 +143,14 @@ async function enviarSolicitud() {
   const datos = { articulos: sol.cesta, desde: new Date($('#sDesde').value + 'T09:00').toISOString(), hasta: new Date($('#sHasta').value + 'T20:00').toISOString(), motivo, comentario: $('#sComentario').value };
   try {
     if (!motivo) throw new Error('Escribe la asignatura o el motivo');
+    if (datos.hasta < datos.desde) throw new Error('La fecha «hasta» es anterior a «desde»');
+    const [desde, hasta] = fechasElegidas();
+    const repes = sol.cesta.filter(id => conflictos(artPorId(id) || {}, desde, hasta).mia);
+    if (repes.length) throw new Error(`Ya pediste ${repes.join(', ')} en otra solicitud para fechas que se solapan. Quítalos o cambia las fechas.`);
     if (sol.editando) { await api('editarSolicitud', { ...datos, id: sol.editando }); salirEdicion(); toast('Cambios guardados'); }
     else { await api('crearSolicitud', datos); sol.cesta = []; sol.motivoOtro = false; toast('Solicitud enviada. Un docente la revisará.'); }
     sol.lista = null;
+    revalidarCatalogo(true).catch(() => {}); // para que el catálogo la muestre como solicitada
     ir('solicitudes');
   } catch (e) {
     btn.disabled = false;
@@ -125,7 +166,11 @@ async function enviarSolicitud() {
 }
 async function cancelarSolicitud(id) {
   if (!confirm('¿Cancelar esta solicitud?')) return;
-  try { await api('cancelarSolicitud', { id }); salirEdicion(); sol.lista = null; sol.respondiendo = null; toast('Solicitud cancelada'); ir('solicitudes'); } catch (e) { fallo(e); }
+  try {
+    await api('cancelarSolicitud', { id }); salirEdicion(); sol.lista = null; sol.respondiendo = null; toast('Solicitud cancelada');
+    revalidarCatalogo(true).catch(() => {}); // sus artículos dejan de figurar como solicitados
+    ir('solicitudes');
+  } catch (e) { fallo(e); }
 }
 
 // ---------- Mis solicitudes ----------
@@ -210,6 +255,24 @@ async function responderCita(id, respuesta) {
   } catch (e) { sol.respondiendo = null; if (btn) btn.disabled = false; fallo(e); }
 }
 
+// Enlaces de los botones del correo de cita: #cita/<id>/aceptar | proponer | nopuedo.
+// Aceptar pide un solo toque más (así un programa que abra los enlaces del correo no responde por nadie);
+// proponer y no puedo abren la solicitud con el formulario ya desplegado.
+function vCitaCorreo(id, accion) {
+  const s = (sol.lista || []).find(x => x.id === id);
+  if (!s) { alMontar = async () => { try { sol.lista = null; await misSolicitudes(); if (sol.lista.some(x => x.id === id)) render(); else $('#citaCorreo').innerHTML = '<p>No se encuentra la solicitud. Puede que se haya cancelado.</p><a class="btn block" href="#solicitudes">Mis solicitudes</a>'; } catch (e) { errorEn('#citaCorreo', e); } }; return `<div class="stack" id="citaCorreo">${esqueleto(2)}</div>`; }
+  if (s.estado !== 'Citada') return `<div class="stack"><h1>Cita</h1><div class="callout warn">Esta solicitud ya no tiene una cita pendiente (${esc(String(s.estado).toLowerCase())}).</div><a class="btn block" href="#solicitud/${encodeURIComponent(id)}">Ver la solicitud</a></div>`;
+  if (accion === 'proponer' || accion === 'nopuedo') {
+    sol.respondiendo = id + ':' + (accion === 'proponer' ? 'Propuesta' : 'Rechazada');
+    setTimeout(() => ir('solicitud/' + encodeURIComponent(id)));
+    return esqueleto(2);
+  }
+  return `<div class="stack"><h1>Confirmar la cita</h1>
+    <div class="callout violet stack"><div>Te han citado el <b>${fmtCita(s.cita)}</b> para recoger el material de <b>${esc(s.motivo)}</b> en el almacén.</div>
+      ${s.respuestaCita === 'Aceptada' ? '<div><b>Ya la habías aceptado.</b> Te esperamos.</div>' : `<button class="btn block" id="btnResp" onclick="responderCita('${esc(id)}', 'Aceptada')">Sí, acepto la cita</button>`}
+      <a class="btn ghost block" style="background:#fff" href="#solicitud/${encodeURIComponent(id)}">Ver la solicitud u otras opciones</a></div></div>`;
+}
+
 // ---------- Mis préstamos ----------
 function vMis() {
   alMontar = () => datosAlDia('mis', () => apiVarias([['prestamos', { todos: true }], ['solicitudes', { mias: true }]]), ([ps, ls]) => {
@@ -257,5 +320,6 @@ async function guardarPerfil() {
 }
 
 Object.assign(VISTAS, {
-  mis: () => vMis(), solicitar: () => vSolicitar(null), solicitud: id => vSolicitud(id), escanear: () => vEscanear(), perfil: () => vPerfilCompleto()
+  mis: () => vMis(), solicitar: () => vSolicitar(null), solicitud: id => vSolicitud(id), escanear: () => vEscanear(), perfil: () => vPerfilCompleto(),
+  cita: id => vCitaCorreo(id, ruta()[2])
 });
