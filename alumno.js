@@ -378,6 +378,7 @@ function vPerfilCompleto() {
         <div><label class="f">Curso</label><select class="input" id="pCurso"><option value="">—</option>${(m.Curso || []).map(c => `<option ${u.curso === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div></div>
       <label class="row small"><input type="checkbox" id="pAvisos" checked> Recibir recordatorios por correo</label>
       <button class="btn" onclick="guardarPerfil()">Guardar</button></div>
+    <a class="btn ghost block" href="#ayuda">Ayuda: cómo funciona la aplicación</a>
     <button class="btn ghost block" onclick="cerrarSesion()">Cerrar sesión</button></div>`;
 }
 async function guardarPerfil() {

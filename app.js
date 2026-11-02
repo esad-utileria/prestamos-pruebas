@@ -391,6 +391,7 @@ function shell(contenido) {
     <header class="top"><div class="top-inner">
       <a class="brand" href="#catalogo"><img src="img/logo-esad.png" alt="ESAD Sevilla"><span class="t">Utilería</span></a>
       <div class="spacer"></div>
+      <a class="ayuda-btn" href="#ayuda" title="Ayuda" aria-label="Ayuda">?</a>
       <span class="badge b-info">${esc(u.rol)}</span>
       <a class="avatar" href="#perfil" title="${esc(u.email)}" style="text-decoration:none">${initials(u.nombre ? u.nombre + ' ' + u.apellidos : u.email)}</a>
     </div></header>

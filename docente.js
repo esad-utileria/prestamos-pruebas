@@ -111,13 +111,13 @@ function vPrestar() {
       <div id="cesta"></div>
       <button class="btn block" id="btnContinuar" onclick="op.paso=3;render()">Continuar</button></div>`;
   }
-  const ahora = new Date(); ahora.setMinutes(0, 0, 0);
   const asig = state.maestros.Asignatura || [];
   return `<div class="stack"><h1>Nuevo préstamo</h1>${pasos}<h2>3. Fechas y motivo</h2>
     <div class="card stack">
       <div><b>${esc(op.alumno.nombre || op.alumno.email)}</b> · ${nArt(op.cesta.length)}</div>
-      <div class="two"><div><label class="f">Desde</label><input class="input" type="datetime-local" id="pIni" value="${localIso(ahora)}"></div>
-        <div><label class="f">Hasta</label><input class="input" type="datetime-local" id="pFin" value="${localIso(sumarDias(ahora, 7, 14))}"></div></div>
+      <div class="two"><div><label class="f">Desde</label><input class="input" type="date" id="pIni" value="${isoDia(new Date())}" onchange="$('#pFin').min=this.value"></div>
+        <div><label class="f">Devolución</label><input class="input" type="date" id="pFin" value="${isoDia(sumarDias(new Date(), 7))}" min="${isoDia(new Date())}"></div></div>
+      <div class="hint" style="margin:0">Los dos días cuentan enteros. El material vuelve a estar libre al día siguiente de la devolución.</div>
       <div class="chips">${[['Hoy', 0], ['1 semana', 7], ['2 semanas', 14], ['1 mes', 30], ['Fin de curso', 'curso']].map(([t, d]) => `<button class="chip" onclick="plazo('${d}')">${t}</button>`).join('')}</div>
       <div><label class="f">Asignatura o motivo</label>
         <select class="input" id="pAsig" onchange="op.asigOtra=this.value==='__otra';$('#pAsigOtra').style.display=op.asigOtra?'block':'none'">${asig.map(a => `<option>${esc(a)}</option>`).join('')}<option value="__otra">Otra…</option></select>
@@ -184,15 +184,15 @@ function pintarCesta() {
   observarFotos();
 }
 
-function localIso(d) { const z = new Date(d.getTime() - d.getTimezoneOffset() * 60000); return z.toISOString().slice(0, 16); }
-function sumarDias(d, n, hora) { const r = new Date(d); r.setDate(r.getDate() + n); if (hora != null) r.setHours(hora, 0, 0, 0); return r; }
+// Los préstamos van por días enteros: el inicio cuenta desde las 0:00 y la devolución hasta las 23:59
+function sumarDias(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
+const diaDe = valor => new Date(valor + 'T00:00');
+const inicioIso = valor => diaDe(valor).toISOString();
+const finIso = valor => new Date(valor + 'T23:59:59').toISOString();
 function plazo(d) {
-  const ini = new Date($('#pIni').value || Date.now());
-  let fin;
-  if (d === 'curso') { fin = new Date(ini.getMonth() >= 6 ? ini.getFullYear() + 1 : ini.getFullYear(), 5, 30, 14); }
-  else if (d === '0') { fin = new Date(ini); fin.setHours(21, 0, 0, 0); }
-  else fin = sumarDias(ini, Number(d), 14);
-  $('#pFin').value = localIso(fin);
+  const ini = $('#pIni').value ? diaDe($('#pIni').value) : new Date();
+  const fin = d === 'curso' ? new Date(ini.getMonth() >= 6 ? ini.getFullYear() + 1 : ini.getFullYear(), 5, 30) : sumarDias(ini, Number(d));
+  $('#pFin').value = isoDia(fin);
 }
 
 async function confirmarPrestamo() {
@@ -200,9 +200,11 @@ async function confirmarPrestamo() {
   const otra = op.asigOtra ? $('#pAsigOtra').value.trim() : '';
   try {
     if (op.asigOtra && !otra) throw new Error('Escribe la asignatura o el motivo');
+    if (!$('#pIni').value || !$('#pFin').value) throw new Error('Indica el día de inicio y el de devolución');
+    if ($('#pFin').value < $('#pIni').value) throw new Error('La devolución no puede ser anterior al inicio');
     const r = await api('prestar', {
       email: op.alumno.email, articulos: op.cesta,
-      inicio: new Date($('#pIni').value).toISOString(), fin: new Date($('#pFin').value).toISOString(),
+      inicio: inicioIso($('#pIni').value), fin: finIso($('#pFin').value),
       asignatura: otra || $('#pAsig').value, asignaturaNueva: !!otra, notas: $('#pNotas').value
     });
     if (otra) (state.maestros.Asignatura = state.maestros.Asignatura || []).push(otra);
@@ -312,7 +314,7 @@ async function devolverUno(id) {
 function vMas() {
   const opciones = [['activos', 'Préstamos activos', 'En curso y con la devolución atrasada', 'box'], ['alta', 'Alta y edición de artículos', 'Nuevos artículos. Para editar uno, escanéalo aquí o ábrelo en el catálogo', 'plus'], ['etiquetas', 'Etiquetas', 'Generar e imprimir códigos de barras', 'tag'],
     ['solicitudes', 'Solicitudes', 'Aprobar, citar o rechazar', 'list'], ['incidencias', 'Incidencias', 'Daños y mantenimiento', 'more'], ['listas', 'Listas', 'Categorías, asignaturas, especialidades y cursos', 'list'],
-    ['usuarios', 'Usuarios y roles', 'Alumnado (especialidad y curso), docentes y administradores', 'user'], ['perfil', 'Perfil', state.usuario.email, 'user']];
+    ['usuarios', 'Usuarios y roles', 'Alumnado (especialidad y curso), docentes y administradores', 'user'], ['ayuda', 'Ayuda', 'Cómo funciona la aplicación, para el profesorado y para el alumnado', 'list'], ['perfil', 'Perfil', state.usuario.email, 'user']];
   return `<div class="stack"><h1>Más opciones</h1><div class="list">${opciones.map(([h, t, d, i]) => `<a class="li" href="#${h}"><div class="thumb" style="display:grid;place-items:center;background:var(--primary-soft);color:var(--primary)">${ICON[i] || ''}</div><div class="grow"><div class="title">${t}</div><div class="small muted">${esc(d)}</div></div></a>`).join('')}</div></div>`;
 }
 ICON.plus = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>';
@@ -754,32 +756,32 @@ function anularNoAcudio(id) {
 // Antes de entregar, el docente ve las fechas pedidas y puede mantenerlas o cambiarlas. Si la devolución
 // pedida ya pasó (el alumno llega tarde), se propone la misma duración a partir de ahora.
 function fechasEntrega(s) {
-  const ahora = new Date(), desde = new Date(s.desde), hasta = new Date(s.hasta);
-  if (hasta > ahora) return { ini: ahora, fin: hasta, tarde: false };
-  const dias = Math.max(1, Math.round((hasta - desde) / 864e5));
-  return { ini: ahora, fin: sumarDias(ahora, dias, 14), tarde: true };
+  const hoy = new Date(), desde = new Date(s.desde), hasta = new Date(s.hasta);
+  if (isoDia(hasta) >= isoDia(hoy)) return { ini: hoy, fin: hasta, tarde: false };
+  const dias = Math.max(1, Math.round((diaDe(isoDia(hasta)) - diaDe(isoDia(desde))) / 864e5));
+  return { ini: hoy, fin: sumarDias(hoy, dias), tarde: true };
 }
 function panelEntrega(s) {
   const f = fechasEntrega(s), id = esc(s.id);
   return `<div class="callout ok stack"><b>Entregar el material ahora</b>
     <div class="small">Pedido por el alumno: <b>del ${fmt(s.desde)} al ${fmt(s.hasta)}</b>.</div>
     ${f.tarde ? `<div class="small" style="color:var(--danger);font-weight:600">La devolución que pidió (${fmt(s.hasta)}) ya ha pasado: se propone la misma duración desde hoy. Revísala antes de entregar.</div>` : ''}
-    <div><label class="f">Entrega</label><input class="input" type="datetime-local" id="apIni" value="${localIso(f.ini)}"></div>
-      <div><label class="f">Devolución</label><input class="input" type="datetime-local" id="apFin" value="${localIso(f.fin)}"></div>
-    <div class="chips" style="flex-wrap:wrap">${f.tarde ? '' : `<button class="chip" onclick="$('#apFin').value='${localIso(new Date(s.hasta))}'">Mantener la pedida (${fmt(s.hasta)})</button>`}
-      <button class="chip" onclick="$('#apFin').value=localIso(sumarDias(new Date($('#apIni').value), 7, 14))">1 semana</button>
-      <button class="chip" onclick="$('#apFin').value=localIso(sumarDias(new Date($('#apIni').value), 14, 14))">2 semanas</button></div>
+    <div><label class="f">Entrega</label><input class="input" type="date" id="apIni" value="${isoDia(f.ini)}" onchange="$('#apFin').min=this.value"></div>
+      <div><label class="f">Devolución</label><input class="input" type="date" id="apFin" value="${isoDia(f.fin)}" min="${isoDia(f.ini)}"></div>
+    <div class="chips" style="flex-wrap:wrap">${f.tarde ? '' : `<button class="chip" onclick="$('#apFin').value='${isoDia(new Date(s.hasta))}'">Mantener la pedida (${fmt(s.hasta)})</button>`}
+      <button class="chip" onclick="$('#apFin').value=isoDia(sumarDias(diaDe($('#apIni').value), 7))">1 semana</button>
+      <button class="chip" onclick="$('#apFin').value=isoDia(sumarDias(diaDe($('#apIni').value), 14))">2 semanas</button></div>
     <div class="two"><button class="btn" onclick="aprobar('${id}')">Confirmar entrega</button><button class="btn ghost" style="background:#fff" onclick="gs.aprobando=null;pintarSolicitudes()">Cancelar</button></div></div>`;
 }
 function aprobar(id) {
   const s = gs.lista.find(x => x.id === id);
   const datos = asignaturaElegida(s);
   if (!datos) return toast('Escribe la asignatura o el motivo');
-  const ini = new Date($('#apIni').value), fin = new Date($('#apFin').value);
-  if (isNaN(ini) || isNaN(fin)) return toast('Indica las fechas de entrega y devolución');
-  if (fin <= ini) return toast('La devolución tiene que ser posterior a la entrega');
+  const ini = $('#apIni').value, fin = $('#apFin').value;
+  if (!ini || !fin) return toast('Indica el día de entrega y el de devolución');
+  if (fin < ini) return toast('La devolución no puede ser anterior a la entrega');
   if (datos.asignaturaNueva) (state.maestros.Asignatura = state.maestros.Asignatura || []).push(datos.asignatura);
-  accionSolicitud(id, 'aprobarSolicitud', { ...datos, inicio: ini.toISOString(), fin: fin.toISOString() }, 'Préstamo registrado y alumno avisado');
+  accionSolicitud(id, 'aprobarSolicitud', { ...datos, inicio: inicioIso(ini), fin: finIso(fin) }, 'Préstamo registrado y alumno avisado');
 }
 
 // ---------- Listas maestras ----------
