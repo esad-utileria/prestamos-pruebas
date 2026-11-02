@@ -20,8 +20,8 @@ const necesitaAtencion = s => s.estado === 'Citada' && (s.respuestaCita === 'Rec
 // día siguiente. Si el alumno ya respondió que no puede o propuso otra fecha, manda esa respuesta.
 const citaVencida = s => s.estado !== 'Citada' || !s.cita || necesitaAtencion(s) || new Date(s.cita) > new Date() ? ''
   : new Date(s.cita).toDateString() === new Date().toDateString() ? 'retraso' : 'noAcudio';
-const badgeCita = s => ({ retraso: '<span class="badge b-warn">Cita con retraso</span>', noAcudio: '<span class="badge b-danger">No acudió a la cita</span>' })[citaVencida(s)] || RESP_CITA[s.respuestaCita || ''];
-const badgeCitaAlumno = s => ({ retraso: '<span class="badge b-warn">Cita con retraso</span>', noAcudio: '<span class="badge b-danger">Cita pasada</span>' })[citaVencida(s)] || RESP_CITA[s.respuestaCita || ''];
+const badgeCita = s => ({ retraso: '<span class="badge b-warn">Cita con retraso</span>', noAcudio: '<span class="badge b-warn">No acudió a la cita</span>' })[citaVencida(s)] || RESP_CITA[s.respuestaCita || ''];
+const badgeCitaAlumno = s => ({ retraso: '<span class="badge b-warn">Cita con retraso</span>', noAcudio: '<span class="badge b-warn">Cita pasada</span>' })[citaVencida(s)] || RESP_CITA[s.respuestaCita || ''];
 const fmtCita = iso => { const d = new Date(iso); return d.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }) + ', ' + d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }); };
 const miniatura = a => `<div class="thumb ph azulejo" ${a && a.foto ? `data-foto="${esc(a.id)}"` : ''} style="aspect-ratio:auto"></div>`;
 const artPorId = id => state.articulos.find(a => a.id === id);

@@ -11,11 +11,18 @@ const pendientes = p => p.lineas.filter(l => !l.devuelto);
 const estadoPrestamo = p => !pendientes(p).length ? '<span class="badge b-info">Devuelto</span>'
   : vencido(p) ? '<span class="badge b-danger">Devolución con retraso</span>'
   : new Date(p.fin).toDateString() === hoy().toDateString() ? '<span class="badge b-warn">Devolver hoy</span>' : '<span class="badge b-ok">En curso</span>';
-// Cada préstamo enseña los artículos que faltan por devolver, para no tener que abrirlo
+// Personas que esperan algún artículo de este préstamo (solicitudes pendientes o citadas de otras personas)
+const esperando = p => pendientes(p).map(l => ({ l, rs: reservasDe(articulo(l.id)).filter(r => r.usuario !== p.usuario) })).filter(x => x.rs.length);
+function avisoEspera(p) {
+  const es = esperando(p); if (!es.length) return '';
+  const n = new Set(es.flatMap(x => x.rs.map(r => r.usuario))).size;
+  return `<div class="small" style="color:var(--violet);font-weight:600">${n === 1 ? 'Hay 1 persona esperando' : `Hay ${n} personas esperando`}: ${es.map(x => `${esc(x.l.desc || x.l.id)} (${x.rs.map(r => esc(r.usuario) + ' desde el ' + fmt(r.desde)).join('; ')})`).join(' · ')}${vencido(p) ? '. <b>Contacta con el alumno para que lo devuelva cuanto antes.</b>' : ''}</div>`;
+}
+// Cada préstamo enseña los artículos que faltan por devolver, para no tener que abrirlo, y si alguien los espera
 const liPrestamo = p => `<a class="li" style="align-items:flex-start" href="#prestamo/${encodeURIComponent(p.id)}"><div class="avatar soft">${initials(p.usuario)}</div>
-  <div class="grow stack" style="gap:4px"><div class="row wrap" style="gap:6px;justify-content:space-between"><div class="title">${esc(p.usuario)}</div>${estadoPrestamo(p)}</div>
+  <div class="grow stack" style="gap:4px"><div class="row wrap" style="gap:6px;justify-content:space-between"><div class="title">${esc(p.usuario)}</div><span class="row wrap" style="gap:4px">${estadoPrestamo(p)}${esperando(p).length ? '<span class="badge b-violet">Con cola</span>' : ''}</span></div>
     <div class="small muted">${esc(p.asignatura)} · hasta el ${fmt(p.fin)}${pendientes(p).length < p.lineas.length ? ` · ${p.lineas.length - pendientes(p).length} de ${p.lineas.length} devueltos` : ''}</div>
-    <div class="small">${pendientes(p).map(l => `<div>· ${esc(l.desc || l.id)} <span class="muted">${esc(l.id)}</span></div>`).join('')}</div></div></a>`;
+    <div class="small">${pendientes(p).map(l => `<div>· ${esc(l.desc || l.id)} <span class="muted">${esc(l.id)}</span></div>`).join('')}</div>${avisoEspera(p)}</div></a>`;
 const thumbArt = a => `<div class="thumb ph azulejo" ${a && a.foto ? `data-foto="${esc(a.id)}"` : ''} style="aspect-ratio:auto"></div>`;
 const cargando = esqueleto(3);
 
@@ -38,7 +45,7 @@ function vInicio() {
     return r;
   }, ([ps, sols, incs]) => {
       op.prestamos = ps; gs.lista = sols;
-      const retraso = ps.filter(vencido);
+      const retraso = ps.filter(vencido).sort((a, b) => esperando(b).length - esperando(a).length);
       const pend = sols.filter(s => s.estado === 'Pendiente');
       const citas = sols.filter(s => s.estado === 'Citada').sort((a, b) => String(a.cita).localeCompare(String(b.cita)));
       const respuestas = citas.filter(necesitaAtencion), sinAcudir = citas.filter(citaVencida);
@@ -720,7 +727,7 @@ async function accionSolicitud(id, accion, datos, mensaje) {
 function bloqueCitaDocente(s) {
   const msg = s.mensajeCita ? ` «${esc(s.mensajeCita)}»` : '';
   const vencida = citaVencida(s);
-  if (vencida) return `<div class="callout ${vencida === 'retraso' ? 'warn' : 'danger'} small stack">${vencida === 'retraso'
+  if (vencida) return `<div class="callout warn small stack">${vencida === 'retraso'
       ? `<div><b>Cita con retraso:</b> era hoy, ${fmtCita(s.cita)}, y el alumno aún no ha venido.</div>`
       : `<div><b>El alumno no acudió a la cita</b> del ${fmtCita(s.cita)}.</div>`}
     <div>Si viene más tarde, pulsa Aprobar. Si no, cambia la cita o anula la solicitud.</div>

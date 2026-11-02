@@ -83,7 +83,7 @@ const AYUDA_DOCENTE = [
       <li>Si un artículo vuelve dañado, márcalo y describe el daño: se abre una <b>incidencia</b> (Más → Incidencias).</li>
       <li>Desde un préstamo puedes devolver los artículos <b>de uno en uno</b> o <b>Devolver todo</b>.</li></ul>`],
   ['Préstamos activos', `
-    <p>En Más → <b>Préstamos activos</b>, cada tarjeta muestra el alumno, la asignatura, el día de devolución, cuántos artículos se han devuelto y la <b>lista de los que faltan</b>, sin tener que abrirla. El filtro <b>Devolución con retraso</b> deja solo los atrasados. Pulsa una tarjeta para ver el préstamo completo.</p>`],
+    <p>En Más → <b>Préstamos activos</b>, cada tarjeta muestra el alumno, la asignatura, el día de devolución, cuántos artículos se han devuelto y la <b>lista de los que faltan</b>, sin tener que abrirla. Si alguien ha solicitado alguno de esos artículos, la tarjeta lleva <span class="badge b-violet">Con cola</span> y dice quién espera y desde cuándo; si además la devolución va con retraso, <b>contacta con el alumno</b> para que lo devuelva cuanto antes (en Inicio, esos retrasos salen primero). El filtro <b>Devolución con retraso</b> deja solo los atrasados. Pulsa una tarjeta para ver el préstamo completo.</p>`],
   ['Solicitudes: revisar y la cola', `
     <p>En Más → <b>Solicitudes</b> hay dos pestañas: <b>Pendientes</b> y <b>Citadas</b>. Van por orden de llegada, con las que piden atención primero. En cada artículo de la solicitud verás:</p>
     <ul><li>«<b>1º de 2 en la cola</b>»: otras personas pidieron el mismo artículo para fechas que se solapan, por orden de llegada. Decide tú a quién atender.</li>
