@@ -9,10 +9,13 @@ const hoy = () => new Date();
 const vencido = p => new Date(p.fin) < hoy() && new Date(p.fin).toDateString() !== hoy().toDateString();
 const pendientes = p => p.lineas.filter(l => !l.devuelto);
 const estadoPrestamo = p => !pendientes(p).length ? '<span class="badge b-info">Devuelto</span>'
-  : vencido(p) ? '<span class="badge b-danger">Con retraso</span>'
+  : vencido(p) ? '<span class="badge b-danger">Devolución con retraso</span>'
   : new Date(p.fin).toDateString() === hoy().toDateString() ? '<span class="badge b-warn">Devolver hoy</span>' : '<span class="badge b-ok">En curso</span>';
-const liPrestamo = p => `<a class="li" href="#prestamo/${encodeURIComponent(p.id)}"><div class="avatar soft">${initials(p.usuario)}</div>
-  <div class="grow"><div class="title">${esc(p.usuario)}</div><div class="small muted">${pendientes(p).length} de ${nArt(p.lineas.length)} · hasta ${fmt(p.fin)}</div></div>${estadoPrestamo(p)}</a>`;
+// Cada préstamo enseña los artículos que faltan por devolver, para no tener que abrirlo
+const liPrestamo = p => `<a class="li" style="align-items:flex-start" href="#prestamo/${encodeURIComponent(p.id)}"><div class="avatar soft">${initials(p.usuario)}</div>
+  <div class="grow stack" style="gap:4px"><div class="row wrap" style="gap:6px;justify-content:space-between"><div class="title">${esc(p.usuario)}</div>${estadoPrestamo(p)}</div>
+    <div class="small muted">${esc(p.asignatura)} · hasta el ${fmt(p.fin)}${pendientes(p).length < p.lineas.length ? ` · ${p.lineas.length - pendientes(p).length} de ${p.lineas.length} devueltos` : ''}</div>
+    <div class="small">${pendientes(p).map(l => `<div>· ${esc(l.desc || l.id)} <span class="muted">${esc(l.id)}</span></div>`).join('')}</div></div></a>`;
 const thumbArt = a => `<div class="thumb ph azulejo" ${a && a.foto ? `data-foto="${esc(a.id)}"` : ''} style="aspect-ratio:auto"></div>`;
 const cargando = esqueleto(3);
 
@@ -38,7 +41,7 @@ function vInicio() {
       const retraso = ps.filter(vencido);
       const pend = sols.filter(s => s.estado === 'Pendiente');
       const citas = sols.filter(s => s.estado === 'Citada').sort((a, b) => String(a.cita).localeCompare(String(b.cita)));
-      const respuestas = citas.filter(necesitaAtencion);
+      const respuestas = citas.filter(necesitaAtencion), sinAcudir = citas.filter(citaVencida);
       const citasHoy = citas.filter(s => new Date(s.cita).toDateString() === hoy().toDateString());
       const abiertas = incs.filter(i => i.estado === 'Abierta');
       const venceHoy = ps.filter(p => !vencido(p) && new Date(p.fin).toDateString() === hoy().toDateString());
@@ -48,12 +51,13 @@ function vInicio() {
       $('#statRetraso').textContent = retraso.length;
       const seccion = (titulo, html, enlace) => html ? `<div class="row"><h2 class="grow">${titulo}</h2>${enlace ? `<a class="small" href="${enlace}" style="color:var(--primary)">Ver todo</a>` : ''}</div><div class="list">${html}</div>` : '';
       const liSol = s => `<a class="li" href="#solicitudes" onclick="gs.tab='${s.estado}'"><div class="avatar soft">${initials(s.usuario)}</div>
-        <div class="grow"><div class="title">${esc(s.usuario)}</div><div class="small muted">${s.estado === 'Citada' ? (s.respuestaCita === 'Propuesta' ? 'Propone: ' + fmtCita(s.citaPropuesta) : fmtCita(s.cita)) : `${nArt(s.articulos.length)} · ${fmt(s.desde)}–${fmt(s.hasta)}`}</div></div>${s.estado === 'Citada' ? RESP_CITA[s.respuestaCita || ''] : ESTADO_SOL[s.estado]}</a>`;
+        <div class="grow"><div class="title">${esc(s.usuario)}</div><div class="small muted">${s.estado === 'Citada' ? (s.respuestaCita === 'Propuesta' ? 'Propone: ' + fmtCita(s.citaPropuesta) : fmtCita(s.cita)) : `${nArt(s.articulos.length)} · ${fmt(s.desde)}–${fmt(s.hasta)}`}</div></div>${s.estado === 'Citada' ? badgeCita(s) : ESTADO_SOL[s.estado]}</a>`;
       $('#inicioCont').innerHTML = [
+        seccion('Citas a las que no ha acudido el alumno', sinAcudir.map(liSol).join(''), '#solicitudes'),
         seccion('Respuestas a citas por gestionar', respuestas.map(liSol).join(''), '#solicitudes'),
-        seccion('Citas próximas', citas.filter(s => !necesitaAtencion(s)).slice(0, 5).map(liSol).join(''), '#solicitudes'),
+        seccion('Citas próximas', citas.filter(s => !necesitaAtencion(s) && !citaVencida(s)).slice(0, 5).map(liSol).join(''), '#solicitudes'),
         seccion('Solicitudes por revisar', pend.slice(0, 5).map(liSol).join(''), '#solicitudes'),
-        seccion('Con retraso', retraso.map(liPrestamo).join(''), '#activos'),
+        seccion('Devoluciones con retraso', retraso.map(liPrestamo).join(''), '#activos'),
         seccion('Se devuelven hoy', venceHoy.map(liPrestamo).join(''), '#activos'),
         abiertas.length ? `<a class="callout warn small" href="#incidencias" style="display:block;text-decoration:none;color:inherit"><b>${abiertas.length} incidencia(s) abierta(s)</b> · Ver incidencias ›</a>` : ''
       ].join('') || '<p class="muted">Todo al día: no hay solicitudes, citas ni retrasos pendientes.</p>';
@@ -67,7 +71,7 @@ function vInicio() {
       <a class="stat" href="#solicitudes" onclick="gs.tab='Pendiente'"><b id="statPend" style="color:var(--warn)">…</b><span class="small muted">Solicitudes por revisar</span></a>
       <a class="stat" href="#solicitudes" onclick="gs.tab='Citada'"><b id="statCitas" style="color:var(--violet)">…</b><span class="small muted">Citas hoy</span></a>
       <a class="stat" href="#activos"><b id="statActivos">…</b><span class="small muted">Préstamos activos</span></a>
-      <a class="stat" href="#activos" onclick="state.filtroActivos='retraso'"><b id="statRetraso" style="color:var(--danger)">…</b><span class="small muted">Con retraso</span></a>
+      <a class="stat" href="#activos" onclick="state.filtroActivos='retraso'"><b id="statRetraso" style="color:var(--danger)">…</b><span class="small muted">Devoluciones con retraso</span></a>
     </div>
     <div class="stack" id="inicioCont">${esqueleto(3)}</div>
   </div>`;
@@ -274,7 +278,7 @@ function vActivos() {
       op.prestamos = ps;
       const filtro = state.filtroActivos || 'todos';
       const lista = filtro === 'retraso' ? ps.filter(vencido) : ps;
-      $('#activosChips').innerHTML = [['todos', `Todos · ${ps.length}`], ['retraso', `Con retraso · ${ps.filter(vencido).length}`]]
+      $('#activosChips').innerHTML = [['todos', `Todos · ${ps.length}`], ['retraso', `Devolución con retraso · ${ps.filter(vencido).length}`]]
         .map(([k, t]) => `<button class="chip ${filtro === k ? 'on' : ''}" onclick="state.filtroActivos='${k}';render()">${t}</button>`).join('');
       $('#activosLista').innerHTML = lista.map(liPrestamo).join('') || '<div class="li muted small">No hay préstamos</div>';
     }).catch(e => errorEn('#activosLista', e));
@@ -306,7 +310,7 @@ async function devolverUno(id) {
 
 // ---------- Más ----------
 function vMas() {
-  const opciones = [['activos', 'Préstamos activos', 'En curso y con retraso', 'box'], ['alta', 'Alta y edición de artículos', 'Nuevos artículos. Para editar uno, escanéalo aquí o ábrelo en el catálogo', 'plus'], ['etiquetas', 'Etiquetas', 'Generar e imprimir códigos de barras', 'tag'],
+  const opciones = [['activos', 'Préstamos activos', 'En curso y con la devolución atrasada', 'box'], ['alta', 'Alta y edición de artículos', 'Nuevos artículos. Para editar uno, escanéalo aquí o ábrelo en el catálogo', 'plus'], ['etiquetas', 'Etiquetas', 'Generar e imprimir códigos de barras', 'tag'],
     ['solicitudes', 'Solicitudes', 'Aprobar, citar o rechazar', 'list'], ['incidencias', 'Incidencias', 'Daños y mantenimiento', 'more'], ['listas', 'Listas', 'Categorías, asignaturas, especialidades y cursos', 'list'],
     ['usuarios', 'Usuarios y roles', 'Alumnado (especialidad y curso), docentes y administradores', 'user'], ['perfil', 'Perfil', state.usuario.email, 'user']];
   return `<div class="stack"><h1>Más opciones</h1><div class="list">${opciones.map(([h, t, d, i]) => `<a class="li" href="#${h}"><div class="thumb" style="display:grid;place-items:center;background:var(--primary-soft);color:var(--primary)">${ICON[i] || ''}</div><div class="grow"><div class="title">${t}</div><div class="small muted">${esc(d)}</div></div></a>`).join('')}</div></div>`;
@@ -602,7 +606,7 @@ async function imprimirEtiquetas() {
 }
 
 // ---------- Solicitudes (profesorado) ----------
-const gs = { tab: 'Pendiente', lista: null, citando: null, foco: null };
+const gs = { tab: 'Pendiente', lista: null, citando: null, aprobando: null, foco: null };
 
 function vSolicitudesDocente(id) {
   if (id) gs.foco = id;
@@ -615,10 +619,11 @@ function pintarSolicitudes() {
   if (!$('#solDoc')) return;
   const ls = gs.lista || [];
   const cuenta = e => ls.filter(s => s.estado === e).length;
-  const atencion = ls.filter(necesitaAtencion).length;
+  const atencion = ls.filter(s => necesitaAtencion(s) || citaVencida(s)).length;
   $('#solTabs').innerHTML = [['Pendiente', 'Pendientes'], ['Citada', 'Citadas']].map(([k, t]) => `<button class="chip ${gs.tab === k ? 'on' : ''}" onclick="gs.tab='${k}';pintarSolicitudes()">${t} · ${cuenta(k)}${k === 'Citada' && atencion ? ` (${atencion} por gestionar)` : ''}</button>`).join('');
   // Por orden de llegada; las citas con respuesta que pide algo al docente van primero
-  const lista = ls.filter(s => s.estado === gs.tab).sort((a, b) => necesitaAtencion(b) - necesitaAtencion(a) || String(a.creada).localeCompare(String(b.creada)));
+  const urge = s => necesitaAtencion(s) || !!citaVencida(s);
+  const lista = ls.filter(s => s.estado === gs.tab).sort((a, b) => urge(b) - urge(a) || String(a.creada).localeCompare(String(b.creada)));
   $('#solDoc').innerHTML = lista.map(tarjetaSolicitud).join('') || '<p class="muted">No hay solicitudes.</p>';
   observarFotos();
   // Desde el enlace de un correo (#solicitudes/<id>): se abre su pestaña y se lleva a la vista
@@ -665,7 +670,7 @@ function tarjetaSolicitud(s) {
   const horaBase = base ? `${String(base.getHours()).padStart(2, '0')}:${String(base.getMinutes()).padStart(2, '0')}` : '10:00';
   return `<div class="card stack" id="sol-${esc(s.id)}">
     <div class="row"><div class="avatar soft">${initials(s.usuario)}</div><div class="grow" style="min-width:0"><b>${esc(s.usuario)}</b><div class="small muted" style="overflow:hidden;text-overflow:ellipsis">${esc(s.especialidad || s.email)}</div></div></div>
-    <div class="row wrap">${s.estado === 'Citada' ? RESP_CITA[s.respuestaCita || ''] : ESTADO_SOL[s.estado]}</div>
+    <div class="row wrap">${s.estado === 'Citada' ? badgeCita(s) : ESTADO_SOL[s.estado]}</div>
     <div class="small muted">Lo necesita del ${fmt(s.desde)} al ${fmt(s.hasta)}${s.comentario ? ` · «${esc(s.comentario)}»` : ''}</div>
     ${s.estado === 'Citada' ? bloqueCitaDocente(s) : ''}
     <div class="list small">${s.articulos.map(i => { const a = artPorId(i); return `<div class="li">${miniatura(a)}<div class="grow"><div class="title">${esc(a ? a.desc : i)}</div><div class="muted">${esc(i)}</div>${avisoCola(s, i, a)}</div>${a ? badge(a) : ''}</div>`; }).join('')}</div>
@@ -677,12 +682,12 @@ function tarjetaSolicitud(s) {
       </select>
       ${s.motivoNuevo ? `<div id="asigTxtCaja-${esc(s.id)}" style="margin-top:8px"><input class="input" id="asigTxt-${esc(s.id)}" value="${esc(s.motivo)}">
         <div class="hint">Texto escrito por el alumno. Corrige erratas antes de aprobar.</div></div>` : ''}</div>
-    ${citando ? `<div class="callout info stack"><b>Citar para recoger</b>
+    ${gs.aprobando === s.id ? panelEntrega(s) : citando ? `<div class="callout info stack"><b>Citar para recoger</b>
         <div class="two"><div><label class="f">Día</label><input class="input" type="date" id="citaDia" value="${isoDia(base || manana)}"></div><div><label class="f">Hora</label><input class="input" type="time" id="citaHora" value="${horaBase}"></div></div>
         <div><label class="f">Mensaje (opcional)</label><textarea class="input" id="citaMsg" rows="2"></textarea></div>
         <div class="two"><button class="btn" onclick="citar('${esc(s.id)}')">Enviar cita por correo</button><button class="btn ghost" onclick="gs.citando=null;pintarSolicitudes()">Cancelar</button></div></div>`
-    : `<div class="three"><button class="btn sm" onclick="aprobar('${esc(s.id)}')">Aprobar</button>
-        <button class="btn violet sm" onclick="gs.citando='${esc(s.id)}';pintarSolicitudes()">${s.estado === 'Citada' ? 'Cambiar cita' : 'Citar'}</button>
+    : `<div class="three"><button class="btn sm" onclick="gs.aprobando='${esc(s.id)}';gs.citando=null;pintarSolicitudes()">Aprobar</button>
+        <button class="btn violet sm" onclick="gs.citando='${esc(s.id)}';gs.aprobando=null;pintarSolicitudes()">${s.estado === 'Citada' ? 'Cambiar cita' : 'Citar'}</button>
         <button class="btn danger sm" onclick="rechazar('${esc(s.id)}')">Rechazar</button></div>
       <div class="hint">Aprobar registra el préstamo en este momento, con el material entregado.</div>`}
   </div>`;
@@ -695,7 +700,7 @@ async function accionSolicitud(id, accion, datos, mensaje) {
   vecinos.forEach(b => { b.disabled = true; });
   if (btn) btn.textContent = 'Enviando…';
   try {
-    await api(accion, { id, ...datos }); toast(mensaje); gs.citando = null;
+    await api(accion, { id, ...datos }); toast(mensaje); gs.citando = null; gs.aprobando = null;
     // Solicitudes y catálogo al día en una sola petición, y se repinta una vez
     try {
       const [ls, arts] = await apiVarias([['solicitudes'], ['catalogo']]);
@@ -704,7 +709,7 @@ async function accionSolicitud(id, accion, datos, mensaje) {
     } catch (x) { gs.lista = null; }
     if (location.hash === '#solicitudes') render();
   } catch (e) {
-    if (e.codigo === 409) gs.citando = null;
+    if (e.codigo === 409) { gs.citando = null; gs.aprobando = null; }
     vecinos.forEach(b => { b.disabled = false; });
     if (btn) btn.textContent = texto;
     fallo(e);
@@ -712,6 +717,12 @@ async function accionSolicitud(id, accion, datos, mensaje) {
 }
 function bloqueCitaDocente(s) {
   const msg = s.mensajeCita ? ` «${esc(s.mensajeCita)}»` : '';
+  const vencida = citaVencida(s);
+  if (vencida) return `<div class="callout ${vencida === 'retraso' ? 'warn' : 'danger'} small stack">${vencida === 'retraso'
+      ? `<div><b>Cita con retraso:</b> era hoy, ${fmtCita(s.cita)}, y el alumno aún no ha venido.</div>`
+      : `<div><b>El alumno no acudió a la cita</b> del ${fmtCita(s.cita)}.</div>`}
+    <div>Si viene más tarde, pulsa Aprobar. Si no, cambia la cita o anula la solicitud.</div>
+    <button class="btn danger sm" style="justify-self:start" onclick="anularNoAcudio('${esc(s.id)}')">${vencida === 'retraso' ? 'Anular la solicitud' : 'Anular: no acudió'}</button></div>`;
   if (s.respuestaCita === 'Aceptada') return `<div class="callout ok small">Cita confirmada por el alumno: <b>${fmtCita(s.cita)}</b>.${msg} Cuando llegue al almacén, pulsa Aprobar.</div>`;
   if (s.respuestaCita === 'Rechazada') return `<div class="callout warn small">No puede ir a la cita del <b>${fmtCita(s.cita)}</b>.${msg}<br>Propón otra fecha con «Cambiar cita» o rechaza la solicitud.</div>`;
   if (s.respuestaCita === 'Propuesta') return `<div class="callout warn small stack">No puede ir a la cita del ${fmtCita(s.cita)} y propone el <b>${fmtCita(s.citaPropuesta)}</b>.${msg}
@@ -734,13 +745,41 @@ function rechazar(id) {
   if (motivo === null) return;
   accionSolicitud(id, 'rechazarSolicitud', { motivo }, 'Solicitud rechazada');
 }
+function anularNoAcudio(id) {
+  const s = gs.lista.find(x => x.id === id);
+  if (!confirm(`¿Anular la solicitud de ${s.usuario}? Se le avisará por correo de que no acudió a la cita.`)) return;
+  accionSolicitud(id, 'rechazarSolicitud', { motivo: 'No acudió a la cita del ' + fmtCita(s.cita), noAcudio: true }, 'Solicitud anulada y alumno avisado');
+}
+// ---------- Aprobar = entregar ----------
+// Antes de entregar, el docente ve las fechas pedidas y puede mantenerlas o cambiarlas. Si la devolución
+// pedida ya pasó (el alumno llega tarde), se propone la misma duración a partir de ahora.
+function fechasEntrega(s) {
+  const ahora = new Date(), desde = new Date(s.desde), hasta = new Date(s.hasta);
+  if (hasta > ahora) return { ini: ahora, fin: hasta, tarde: false };
+  const dias = Math.max(1, Math.round((hasta - desde) / 864e5));
+  return { ini: ahora, fin: sumarDias(ahora, dias, 14), tarde: true };
+}
+function panelEntrega(s) {
+  const f = fechasEntrega(s), id = esc(s.id);
+  return `<div class="callout ok stack"><b>Entregar el material ahora</b>
+    <div class="small">Pedido por el alumno: <b>del ${fmt(s.desde)} al ${fmt(s.hasta)}</b>.</div>
+    ${f.tarde ? `<div class="small" style="color:var(--danger);font-weight:600">La devolución que pidió (${fmt(s.hasta)}) ya ha pasado: se propone la misma duración desde hoy. Revísala antes de entregar.</div>` : ''}
+    <div><label class="f">Entrega</label><input class="input" type="datetime-local" id="apIni" value="${localIso(f.ini)}"></div>
+      <div><label class="f">Devolución</label><input class="input" type="datetime-local" id="apFin" value="${localIso(f.fin)}"></div>
+    <div class="chips" style="flex-wrap:wrap">${f.tarde ? '' : `<button class="chip" onclick="$('#apFin').value='${localIso(new Date(s.hasta))}'">Mantener la pedida (${fmt(s.hasta)})</button>`}
+      <button class="chip" onclick="$('#apFin').value=localIso(sumarDias(new Date($('#apIni').value), 7, 14))">1 semana</button>
+      <button class="chip" onclick="$('#apFin').value=localIso(sumarDias(new Date($('#apIni').value), 14, 14))">2 semanas</button></div>
+    <div class="two"><button class="btn" onclick="aprobar('${id}')">Confirmar entrega</button><button class="btn ghost" style="background:#fff" onclick="gs.aprobando=null;pintarSolicitudes()">Cancelar</button></div></div>`;
+}
 function aprobar(id) {
   const s = gs.lista.find(x => x.id === id);
   const datos = asignaturaElegida(s);
   if (!datos) return toast('Escribe la asignatura o el motivo');
-  if (!confirm(`¿Entregar ahora ${s.articulos.length} artículo(s) a ${s.usuario}?`)) return;
+  const ini = new Date($('#apIni').value), fin = new Date($('#apFin').value);
+  if (isNaN(ini) || isNaN(fin)) return toast('Indica las fechas de entrega y devolución');
+  if (fin <= ini) return toast('La devolución tiene que ser posterior a la entrega');
   if (datos.asignaturaNueva) (state.maestros.Asignatura = state.maestros.Asignatura || []).push(datos.asignatura);
-  accionSolicitud(id, 'aprobarSolicitud', datos, 'Préstamo registrado y alumno avisado');
+  accionSolicitud(id, 'aprobarSolicitud', { ...datos, inicio: ini.toISOString(), fin: fin.toISOString() }, 'Préstamo registrado y alumno avisado');
 }
 
 // ---------- Listas maestras ----------

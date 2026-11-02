@@ -439,8 +439,8 @@ function vLogin(aviso) {
 function vCatalogo() {
   const doc = esDocente();
   const f = state.filtro;
-  const cuenta = k => state.articulos.filter(a => k === 'todos' || a.estado === k).length;
-  const filtros = doc ? [['todos', 'Todos'], ['disp', 'Disponibles'], ['prest', 'Prestados'], ['mant', 'Mantenimiento']] : [['todos', 'Todos'], ['disp', 'Disponibles']];
+  const cuenta = k => state.articulos.filter(a => k === 'todos' || estadoVisible(a) === k).length;
+  const filtros = doc ? [['todos', 'Todos'], ['disp', 'Disponibles'], ['resv', 'Reservados'], ['prest', 'Prestados'], ['mant', 'Mantenimiento']] : [['todos', 'Todos'], ['disp', 'Disponibles'], ['resv', 'Reservados']];
   const cats = state.maestros.Categoria || [];
   return `<div class="stack">
     <div class="row"><h1>Catálogo</h1><div class="spacer"></div>${doc ? '' : '<a class="btn ghost sm" href="#escanear">Escanear</a>'}<button class="btn ghost sm" onclick="recargar()">Actualizar</button></div>
@@ -457,13 +457,13 @@ function vCatalogo() {
 function listaCatalogo() {
   const doc = esDocente(), q = state.q.toLowerCase(), f = state.filtro;
   const lista = state.articulos.filter(a => (!state.cat || a.cat === state.cat)
-    && (f === 'todos' || a.estado === f)
+    && (f === 'todos' || estadoVisible(a) === f)
     && (!q || (a.desc + ' ' + a.id).toLowerCase().includes(q)));
   return `<div class="small muted" style="margin-bottom:10px">${nArt(lista.length)}</div>
     <div class="grid">${lista.map(a => `<a class="item" href="#articulo/${encodeURIComponent(a.id)}">${ph(a)}<div class="info"><div class="name">${esc(a.desc)}</div>
-      ${doc && a.prestamo ? `<div class="small muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a.prestamo.usuario)}</div><div class="small" style="color:var(--warn);font-weight:600">Hasta el ${fmt(a.prestamo.fin)}</div>` : ''}
+      ${doc && a.prestamo ? `<div class="small muted">${esc(a.prestamo.usuario)}</div><div class="small" style="color:var(--warn);font-weight:600">Hasta el ${fmt(a.prestamo.fin)}</div>` : ''}
       ${resumenReservas(a)}
-      <div class="row" style="justify-content:space-between"><span class="id">${esc(a.id)}</span>${badge(a)}</div></div></a>`).join('')}</div>`;
+      <div class="row wrap" style="justify-content:space-between;gap:6px"><span class="id">${esc(a.id)}</span>${badge(a)}</div></div></a>`).join('')}</div>`;
 }
 // Al escribir en el buscador solo se repinta la lista: si se repintara la casilla, el móvil cerraría el teclado
 function renderBusqueda() {
@@ -475,13 +475,14 @@ function renderBusqueda() {
 // ---------- Solicitudes de cada artículo (la cola) ----------
 // a.reservas: solicitudes pendientes o citadas, por orden de llegada: { desde, hasta, estado, mia, usuario? }
 const reservasDe = a => (a && a.reservas) || [];
+const diaSiguiente = iso => { const d = new Date(iso); d.setDate(d.getDate() + 1); d.setHours(0, 0, 0, 0); return d; };
 const periodo = r => `del ${fmt(r.desde)} al ${fmt(r.hasta)}`;
 const quienReserva = r => r.mia ? 'Tú' : r.usuario ? r.usuario : 'Otra persona';
 function resumenReservas(a) {
   const rs = reservasDe(a); if (!rs.length) return '';
   const mia = rs.find(r => r.mia), r = mia || rs[0];
   const texto = mia ? 'En tu solicitud' : esDocente() ? `Solicitado (${rs.length})` : 'Ya solicitado';
-  return `<div class="small" style="color:var(--violet);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${texto} · ${fmt(r.desde)}–${fmt(r.hasta)}</div>`;
+  return `<div class="small" style="color:var(--violet);font-weight:600">${texto} · ${fmt(r.desde)}–${fmt(r.hasta)}</div>`;
 }
 function bloqueReservas(a) {
   const rs = reservasDe(a); if (!rs.length) return '';
@@ -489,7 +490,10 @@ function bloqueReservas(a) {
     ${rs.map((r, i) => `<div>${rs.length > 1 ? `${i + 1}º · ` : ''}${esc(quienReserva(r))} ${periodo(r)}${r.estado === 'Citada' ? ' · <b>citado</b>' : ''}</div>`).join('')}
     ${esDocente() ? '' : '<div class="muted">Puedes pedirlo para otras fechas. Si se solapan, quedarás en cola y decidirá el docente.</div>'}</div>`;
 }
+// Disponible pero con solicitudes pendientes o citadas: se muestra como «Reservado» (para quien lo pidió y para el resto)
+const estadoVisible = a => a.estado === 'disp' && reservasDe(a).length ? 'resv' : a.estado;
 const badge = a => a.prestamo && a.prestamo.mio ? '<span class="badge b-info">En tu préstamo</span>'
+  : estadoVisible(a) === 'resv' ? '<span class="badge b-violet">Reservado</span>'
   : { disp: '<span class="badge b-ok">Disponible</span>', prest: '<span class="badge b-warn">Prestado</span>', mant: '<span class="badge b-danger">Mantenimiento</span>', baja: '<span class="badge b-danger">Baja</span>' }[a.estado];
 
 function vArticulo(id) {
@@ -499,7 +503,7 @@ function vArticulo(id) {
   let info = '';
   if (a.prestamo && a.prestamo.mio) info = `<div class="callout ok">Lo tienes tú en préstamo. Devuélvelo antes del <b>${fmt(a.prestamo.fin)}</b>.</div>`;
   else if (a.prestamo && doc) info = `<div class="callout warn">Prestado a <b>${esc(a.prestamo.usuario)}</b> hasta el <b>${fmt(a.prestamo.fin)}</b>.</div>`;
-  else if (a.prestamo) info = `<div class="callout warn">No está disponible ahora. Vuelve al almacén hacia el <b>${fmt(a.prestamo.fin)}</b>.</div>`;
+  else if (a.prestamo) info = `<div class="callout warn">No está disponible ahora. Vuelve al almacén hacia el <b>${fmt(a.prestamo.fin)}</b>. Puedes pedirlo a partir del <b>${fmt(diaSiguiente(a.prestamo.fin))}</b>.</div>`;
   else if (a.estado === 'mant') info = '<div class="callout warn">Está en mantenimiento.</div>';
   return `<div class="stack">
     <a href="#catalogo" class="small" style="color:var(--primary);text-decoration:none">← Catálogo</a>
